@@ -1,0 +1,1676 @@
+'*************************************************************************************
+'* Tajikistan, Pik Ismoil Somoni Base Camp - snowdrift- & meteo-station              *
+'*   A station with a CR1000X for the measurement of several meteorological
+'*   parameters in the Pamir mountain range powered by solar and data transmission
+'*   over satellite modem and monitored by a small webcam.
+'*************************************************************************************
+'* program:  Tajikistan_snwodrift-_meteostation.cr1x
+'* author:   Ch. Buchli
+'* date:     2020-01-29
+'* revision: v1.2.1 (AH, 19.08.2025)
+'* remarks:  partly copied STN3prog_main.CR6 (Jerome Dujardin, Antarctica-station)
+'*************************************************************************************
+'* sensors:  1 x Young 3D Sonic Anemometer 81000RE (wind)
+'*           1 x Young/Campbell 05103-5 (propeller anemometer, wind)
+'*           1 x Campbell ClimaVUE50 (wind, air temp. & rel.hum., air pressure)
+'*           1 x Campbell CS215 (air temp. & rel.hum)
+'*           1 x Campbell HygroVUE10 (air temp. & rel.hum)
+'*           1 x Apogee/Campbell SI-111-L-10 (snow surface temperature)
+'*           2 x Campbell 107 (soil temperature)
+'*           1 x Apogee/Campbell SN-500-SS (four-component radiation)
+'*           1 x Lufft SHM31 (snow height, laser)
+'*           1 x FlowCapt FC4 (snow drift, particle counter)
+'*************************************************************************************
+'* revision history:
+'*    v0.0.1    first draft & WIP (work in progress), polar output of sonic anemometer
+'*    v0.0.2    further WIP, power control und measurement timing
+'*    v0.0.3    corrections (test if ClimaVUE is on)
+'*    v0.0.4    initial program, tested on logger
+'*    v0.0.5    adapt read commands for Lufft SHM31, correction of sonics multiplier
+'*    v0.0.6    adapt routine to determine actual fast file, adapt determination of a
+'*              first record in file, add free cards space to station status, disable
+'*              switching on & off the sonic anemometer (leave it always on)
+'*    v0.0.7    adapt Luffts calibration procedure, adapt comments
+'*    v0.0.8    add flag for table-processing of Lufft-data
+'*    v0.0.9    changed names of radiation, resolve problem with weekly interval for
+'*              satellite modem (IfTime-function with days in SatModemOn_Time), manual
+'*              camera control implementation, shorten modems power control, decrease
+'*              settling time of propellers and soil temperature measuring
+'*    v0.0.10   stop recording fast-table if card is full, improve switching on & off
+'*              of sonic anemometer (still left commented), change CardsFreeMemory
+'*              to [kB], improve control of table processing (Lufft & WindClimaVue),
+'*              add processing control for LightStrikeDist
+'*    v0.0.11   addition to switch modem off, if nothing else
+'*    v0.0.12   set scan-buffer for slow scan too
+'*    v1.0.0    increase version after successful tests, ready for deployment
+'*              there are several optional improvements left, but as version 0.0.12
+'*              worked so far well at Duerrboden during winter 20/21, the station will
+'*              be shipped to Tadschikistan without changes on the loggers program
+'*    v1.1.0    AstroNode Function added with one slow scan at the end, search for "AstroNode"
+'*    v1.1.1    AstroNode Function 1.8 (Sync with time offset) added; averaging table for AN
+'*    v1.1.2    correction timing 00:01 of sync. with AstroNode 
+'*    v1.1.3    added variable definitions for astronode transmission
+'*    v1.2.0    tested version for astronode data transmission; correction service data (AH)
+'*    v1.2.1    adapted AstroNode transmission with hourly meteo data (AH)
+'*    v1.2.2    averaging of remaining variables added to AstroNode table; new AN-functions V2.0 (AH)
+'*************************************************************************************
+'* use instructions and functional description:
+'*  - the logger runs on local time, UTC+5, without daylight saving correction
+'*************************************************************************************
+Const cProgVers = "1.2.2"  '' program version number to be transmitted in config information
+
+'SequentialMode             'run logger in sequential mode, instead of pipeline mode
+'as some measurements are done contitionally, sequential mode is more suitable
+'logger compiles automatically in sequential mode, if forced to pipeline mode a lot
+'  of functions are not allowed at their actual position
+'***   constants & variables are declared in a seperate file   ***********************
+'*************************************************************************************
+'* Tajikistan, Pik Ismoil Somoni Base Camp - snowdrift- & meteo-station              *
+'*************************************************************************************
+'* file:     Tajikistan_ConstantsVariables.cr1x          * author:   Ch. Buchli
+'* revision: v1.0.0                                      * date:     2020-02-03
+'*************************************************************************************
+'* main program:  Tajikistan_snwodrift-_meteostation.cr1x
+'* description:   declaration of the constants and variables for the main program
+'*************************************************************************************
+'* revision history:
+'*    v0.0.1    first draft of port connections & sonic anemometer with polar output
+'*    v0.0.2    further WIP, adapt parameters & add variables, change ports assignment
+'*    v0.0.4    initial program, tested on logger
+'*    v0.0.5    adapt read commands for Lufft SHM31, correction of sonics multiplier
+'*    v0.0.6    add few variables for status, add several comments
+'*    v0.0.7    extend on-time of SHM31 for correct values, change read-cmd for FC4
+'*    v0.0.8    add flag for table-processing of Lufft-data
+'*    v0.0.9    changed names of radiation, weekly modem-interval, timer for camera
+'*    v0.0.10   adapt timer thresholds for camera & modem considering control slow
+'*              scan interval of 10min, add variables to control cards free memory,
+'*              adapt variables for table-processing, add it for LightStrikesDist
+'*    v1.0.0    increase version after successful tests, ready for deployment
+'*************************************************************************************
+
+'***   general constants & variables   ***********************************************
+Const KelvinToCelsius = -273.15      'for conversion from °K to °C, +273.15°
+Const FracToPercent = 100            'for conversion from a fraction (0-1) to percent
+Const KiloToHecto = 10               'for conversion from e.g. kPa to hPa
+Const toMilli = 1000                 'for conversion from e.g. m to mm
+Const toKiloB = 2^10                 ' = 1024, for conversion from B to kB
+
+ConstTable       '***   this table contains configuration settings of the system   ***
+  Const FastScanInterval = 50        'interval of fast (main) scan-loop [ms], = 20Hz
+  Const SlowScanMeasureInterval = 1  'interval of slow sequence scan [min]
+  Const SlowScanControlInterval = 10 'interval for control slow sequence scan [min]
+  Const MeteoDataInterval = 10       'interval for general datatable meteodata [min]
+  Const ServcieDataInterval = 30     'interval for general service data [min]
+  Const TransmitDataInterval = 60    'for data to transmit over satellite [min]
+  
+  Const AnemoSonic_Pwr = SW12_1      'switched 12V for Young 3D Sonic Anemometer
+  'Const AnemoSonicSpeed_SEch = 1     'SE-channel for sonics speed-output
+  'Const AnemoSonicAzi_SEch = 2       'SE-channel for sonics azimuth-output
+  'Const AnemoSonicElev_SEch = 3      'SE-channel for sonics elevation-output
+  Const AnemoSonicU_SEch = 1         'SE-channel for sonics U-speed-output, from east
+  Const AnemoSonicV_SEch = 2         'SE-channel for sonics V-speed-output, from north
+  Const AnemoSonicW_SEch = 3         'SE-channel for sonics W-speed-output, from below
+  Const AnemoSonicTemp_SEch = 4      'SE-channel for sonics temperature-output
+  Const AnemoPropSpeed_Pch = P1      'pulse channel for propellers speed-output
+  Const AnemoPropDir_SEch = 8        'SE-channel for propellers direction-output
+  Const AnemoPropDir_VxCh = Vx1      'excitation channel for direction-potentiometer
+  Const ClimaTRH_SDIPort = C3        'data channel for ClimaVUE50, CS215 & HygroVUE10
+  Const ClimaTRH_FlowCapt_Pwr = C4
+    'switch for ClimaVUE50, CS215, HygroVUE10 & FC4, NC (running continuously)
+  Const SI111_DIFFch = 3             'differential channel for thermopile detector
+  Const SI111_SEch = 7               'SE-channel for body temperature
+  Const SI111_VxCh = Vx2             'excitation channel for body temperature
+  Const SoilTemp1_SEch = 13          'SE-channel first soil temperature measurement
+  Const SoilTemp1_VxCh = Vx3         'excitation channel first soil temperature
+  Const SoilTemp2_SEch = 14          'SE-channel second soil temperature measurement
+  Const SoilTemp2_VxCh = Vx4         'excitation channel second soil temperature
+  Const SN500SS_Pwr = SW12_2         'switched 12V  for radiation sensor
+  Const SN500SS_SDIPort = C1         'data channel for the radiation sensor
+  Const LufftSnowHeight_Pwr = C6     'port for Lufft snow height gauges switch, NO
+  Const LufftHeaterEnable = C2       'control of heater of Lufft-sensor, NO
+  Const LufftSDIPort = C5            'data channel for the Lufft-sensor (same as FC4)
+  Const FlowCapt_PartFlux_SEch = 9   'SE-channel for the particle flux output
+  Const FlowCapt_WindSp_SEch = 10    'SE-channel for the wind speed output
+  Const FlowCaptSDIPort = C5         'data port for FlotCapt (same as Lufft)
+  'Const SatTerm_Pwr = C7             'port for switch of satellite terminal, NO
+  Const Cam_Pwr = C8                 'port for cams switch, NO
+
+  Const AnemoPwrOnWindThreshold = 2.5
+    '[m/s], if there's more wind (9km/h), sonic anemometer will be powered on
+  Const AnemoPwrOffTimerThreshold = 300
+    '[s], how long the sonic anemo still runs before powered off (5min)
+  Const AnemoPwrBattThreshold = 11.7 'if voltage drops below, switch anemo off [V]
+  Const ClimaVue_TRH_FC4_SN500SS_ResetTime = 5 'reset time for sensors [min]
+  Const FlowCaptMeasureInterval = 10 'interval for FC4 values readout [min]
+  
+  Const SN500SS_HeatBattThreshold = 12.3       'if battery drops below, don't heat [V]
+  Const SN500SS_HeatTime = 5         'heat sensor for time [min] (depending on scan)
+  Const SN500SS_HeatDeadTime = 90    'after heating, don't heat anymore for [min]
+  Const SN500SS_HeatTempThreshold = 2          'heat if air temp is below [°C]
+  Const SN500SS_HeatHumThreshold = 90          'heat if humidity is above [%]
+  Const SN500SS_HeatRadMinThreshold = 100      'heat if SWin radiation is below [W]
+  Const SN500SS_RadMinTimewindowInt = 1440     'check for minimal radiation from
+  Const SN500SS_RadMinTimewindowStart = 570    '  9:30 to 14:30 local time
+  Const SN500SS_RadMinTimewindowStop = 870
+
+  Const LufftPwrInterval = 10        'switch on interval of the laser instrument [min]
+  Const LufftPwrUpIntoInt = 8        'switch on at the ninth minute [min]
+  Const LufftPwrDownIntoInt = 10     'switch off at the tenth minute [min]
+  Const LufftPwrBattThreshold = 11.8 'don't switch on Lufft if battery drops below [V]
+  Const LufftHeatBattThreshold = 12.5     'if the battery drops below this
+    'voltage, don't enable the Luffts main heating anymore [V]
+  Const LufftHeatTime = 10           'enable heating for [min]
+  Const LufftHeatDeadTime = 300      'after heating, don't heat anymore for [min]
+
+  Const SatModemIntervalDays = 7     'interval of modem-switch on [day], weekly
+  Const SatModemPwrOn_Day1 = 2       'satellite modem on on Mon, Wed and Fri
+  Const SatModemPwrOn_Day2 = 4       ' numbering of RealTime-DayOfWeek, not of IfTime
+  Const SatModemPwrOn_Day3 = 6
+  Const SatModemIntervalMinutes = 1440         'interval in the day [min]
+  Const SatModemPwrUpTime = 630      'power up modem at 10:30 local time UTC+5 [min]
+  Const SatModemPwrDownTime = 690    'shut down modem at 11:30 local time UTC+5 [min]
+  Const SatModemBattThreshold = 12.3 'if voltage drops below, don't switch on [V]
+  Const SatModemTimerThreshold = 15  'time the satellite modem will be powered
+  Const SatModemTimerPwrDownThreshold = 15     '   manually, counted with timer [min]
+    'extension time, before satellite modem will be powered off [min]
+    '  the interval of the control slow can (10min) has to be considered
+
+  Const CamIntervalMinutes = 1440    'interval into the day [min]
+  Const CamPwrUpTime1 = 410          'switch cam on from 6:50 local time UTC+5 [min]
+  Const CamPwrDownTime1 = 420        '  to 7:00 local time UTC+5 [min]
+  Const CamPwrUpTime2 = 610          'switch cam on from 10:10
+  Const CamPwrDownTime2 = 620        '  to 10:20
+  Const CamPwrUpTime3 = 810          'switch cam on from 13:30
+  Const CamPwrDownTime3 = 820        '  to 13:40
+  Const CamPwrUpTime4 = 1010         'switch cam on from 16:50
+  Const CamPwrDownTime4 = 1020       '  to 17:00
+  Const CamPwrUpTimeSat = 650        'switch cam on from 10:50 to 11:00
+  Const CamPwrDownTimeSat = 660      '  if satellite terminal is powered too
+  Const CamBattThreshold = 12.3      'if voltage drops below, don't switch on [V]
+  Const CamTimerThreshold = 15       'time cam will be powered manually, timer [min]
+EndConstTable
+
+Const Timer_FastTimestamp = 0        'timer used to create a pseudo-timestamp
+Const Timer_AnemoSonic_PwrOff = 1    'timer for sonic anemometers delayed power off
+Const Timer_ClimaVueTRHFC4_Reset = 2 'timer for sensors reset
+Const Timer_SN500SS_Reset = 3        'timer for sensors reset
+Const Timer_SN500SS_Heater = 4       'timer to control the sensors heating
+Const Timer_Lufft_Heater = 5         'timer to control the sensors heating
+Const Timer_SatModemPwrDown = 6      'timer for powering down the satellite modem
+Const Timer_CamPwrDown = 7           'timer for powering down the camera
+
+Const T_Start = 0          'options for use of timer
+Const Reset_Start = 2
+Const Stop_Reset = 3
+Const Read_only = 4
+
+Const NC_ON = False        'for switches, normally open or normally closed
+Const NC_OFF = True
+Const NO_ON = True
+Const NO_OFF = False
+
+'***   constants & variables for sonic anemometer  ***********************************
+'Const SonicSpeedRange = 50           '3D wind speed range [m/s]
+'Const SonicAziRange = 540            'azimuth range, in ratio to measure range [°]
+'Const SonicElevMin = -60             'minimal elevation [°]
+'Const SonicElevMax = 60              'maximal elevation [°]
+Const SonicSpeedScale = 50           'wind speed scale for UVW [m/s], means ±50m/s
+Const SonicTempMin = 220             'minimal sonic temperature [°K]
+Const SonicTempMax = 320             'maximal sonic temperature [°K]
+Const SonicVoltRange = 5000          'voltage output range [mV]
+'Public SonicMul(4) = {SonicSpeedRange,SonicAziRange,SonicElevMax-SonicElevMin,SonicTempMax-SonicTempMin}/SonicVoltRange
+'Public SonicOff(4) = {0,0,SonicElevMin,SonicTempMin+KelvinToCelsius}
+Public SonicMul(4) = {2*SonicSpeedScale/SonicVoltRange,2*SonicSpeedScale/SonicVoltRange,2*SonicSpeedScale/SonicVoltRange,(SonicTempMax-SonicTempMin)/SonicVoltRange}
+Public SonicOff(4) = {-SonicSpeedScale,-SonicSpeedScale,-SonicSpeedScale,SonicTempMin+KelvinToCelsius}
+ReadOnly SonicMul, SonicOff          'as it's not possible to declare constant array
+
+'Dim AnemoSonicVoltRaw(4)             'for speed, azimut, elevation and temperature
+'Public AnemoSonic(4) : Alias AnemoSonic = WindSpeed_Sonic, WindAzi_Sonic, WindElev_Sonic, TempAir_Sonic
+'Units WindSpeed_Sonic = m/s : Units WindAzi_Sonic = ° : Units WindElev_Sonic = ° : Units TempAir_Sonic = °C
+Dim AnemoSonicVoltRaw(4)             'for 3 orthogonal speed components & temperature
+Public AnemoSonic(4) : Alias AnemoSonic = WindSpeed_SonicU_east,   WindSpeed_SonicV_north, WindSpeed_SonicW_below, TempAir_Sonic
+    '+U wind from east, +V wind from north, +W wind from below (updraft)
+Units WindSpeed_SonicU_east = m/s : Units WindSpeed_SonicV_north = m/s
+Units WindSpeed_SonicW_below = m/s : Units TempAir_Sonic = °C
+
+'***   constants & variables for propeller anemometer  *******************************
+'Const PropSpeedMul = 0.1666          'measured frequency to speed, for 05108-45 model
+Const PropSpeedMul = 0.0980          'measured frequency to speed, for 05103 model
+Const PropDirMul = 355
+  'between 355° and 360°, wind vane has dead band, therefore the multiplier isn't 360
+Const PropSpeed_PulseCountAvgRun = SlowScanMeasureInterval * 60 * 1000       '[ms]
+  'calculate a running average over a measure scan interval [min], as the
+  '  PulseCount-function has to be in the fast scan loop
+
+Public AnemoProp(2) : Alias AnemoProp = WindSpeed_Prop, WindDir_Prop
+Units WindSpeed_Prop = m/s : Units WindDir_Prop = °
+
+'***   constants & variables for ClimaVUE50 weather sensor  **************************
+Const ClimaVueAddress = "1"          'SDI12-address of ClimaVUE50-sensor
+Const ClimaVue_StdReadCMD = "R7!"    'standard SDI12 read command for sensors values
+Const Clima_TRH_ReadCMD = "C!"       'read command for ClimaVUE50, CS215 & HygroVUE10
+
+Public ClimaVueData(14) : Alias ClimaVueData = SolarRad_ClimaVue, Precip_ClimaVue,   LightStrikesCnt, LightStrikesDist, WindSpeed_ClimaVue, WindDir_ClimaVue,   WindSpeedMax_ClimaVue, TempAir_ClimaVue, PresVapour, PresBaroAbs, RelHum_ClimaVue,   TempHumSens_ClimaVue, TiltNS_ClimaVue, TiltWE_ClimaVue 'values for R7!-SDI12-command
+Units SolarRad_ClimaVue = W/m² : Units Precip_ClimaVue = mm
+Units LightStrikesDist = km : Units WindSpeed_ClimaVue = m/s
+Units WindDir_ClimaVue = ° : Units WindSpeedMax_ClimaVue = m/s
+Units TempAir_ClimaVue = °C : Units PresVapour = hPa : Units PresBaroAbs = hPa
+Units RelHum_ClimaVue = % : Units TempHumSens_ClimaVue = °C
+Units TiltNS_ClimaVue = ° : Units TiltWE_ClimaVue = °
+
+Public Wind_ClimaVue_DataInvalid As Boolean    'to disable processing in datatable
+Dim LightStrikesDist_DataInvalid As Boolean    'if distance is 0, for minimal function
+
+'***   constants & variables for the two Temp&RelHum-sensors  ************************
+Const TRH_CS215Address = "2"         'SDI12-address of CS215 TRH-sensor
+Const TRH_HygroVueAddress = "3"      'SDI12-address of HygroVUE10 sensor
+Const TRH_StdReadCMD = "M!"          'manuals standard read command, both TRH-sensors
+
+Public TRHData(2,2) : Alias TRHData = TempAir_CS215, RelHum_CS215, TempAir_HygroVUE10, RelHum_HygroVUE10
+Units TempAir_CS215 = °C : Units TempAir_HygroVUE10 = °C
+Units RelHum_CS215 = % : Units RelHum_HygroVUE10 = %
+
+'***   constants & variables for infrared radiometer (surface temperature)  **********
+Public SI1117902_CalibCoef(2,3) = {81723.1,9311910,1567870000,3832.71,-42766.5,5765790}
+ReadOnly SI1117902_CalibCoef         'calibration coeff. from SI-111-L-10 with SN 7902
+Alias SI1117902_CalibCoef = mC2, mC1, mC0, bC2, bC1, bC0
+
+Public TempBody_SI111, TempSurf_SI111
+Units TempBody_SI111 = °C : Units TempSurf_SI111 = °C
+
+'***   constants & variables for the two soil temperature sensors  *******************
+Public TempSoil(2) : Alias TempSoil = TempSoil_1, TempSoil_2 : Units TempSoil() = °C
+
+'***   constants & variables for four-component radiation sensor  ********************
+Const SN500SS_Address = "4"          'SDI12-address of SN-500-SS radiation sensor
+Const SN500SS_ReadCMD = "MC!"        'SDI12-command to read the sensors values
+Const SN500SS_HeatOnCMD = "XHON!"    'SDI12-command to switch the sensors heater on
+Const SN500SS_HeatOffCMD = "XHOFF!"  'SDI12-command to switch the sensors heater off
+
+Public RadNet_SN500SS(4) : Units RadNet_SN500SS() = W/m²
+Alias RadNet_SN500SS = ISWR, RSWR, ILWR, OLWR
+  'ISWR = downwelling shortwave radiation [W/m²]
+  'RSWR = upwelling (reflected) shortwave radiation [W/m²]
+  'ILWR = downwelling longwave radiation [W/m²]
+  'OLWR = upwelling (emitted) longwave radiation [W/m²]
+
+Public ISWRmax : Units ISWRmax = W/m²
+Const ISWRmax_RunNr = 30 / SlowScanMeasureInterval       'running maximum over ½ h
+Public SN500SS_HeaterActive As Boolean : ReadOnly SN500SS_HeaterActive
+Dim SN500SSSpecialCMDresponse As String * 30   'used for SDI12Recorder with commands
+
+'***   constants & variables for snow height laser detector  *************************
+Const LufftStartupDelay = 60         'time for sensor to have good values [s]
+Const LufftSHM31_Address = "5"       'SDI12-address of Lufft SHM 31 snow heigt sensor
+'Const Lufft_ReadCMD = "M!"           'SDI12-command to read all data from the sensor
+Const Lufft_ReadCMD_0 = "R0!"        'SDI12-command read data buffer 0 from sensor
+Const Lufft_ReadCMD_1 = "R1!"        'SDI12-command read data buffer 1 from sensor
+Const Lufft_CalibCMD = "XARV!"       'SDI12-command for offset and angle calibration
+Const Lufft_CalibRESP = LufftSHM31_Address & "XARVok"    'respond after the command
+Const Lufft_ResetCMD = "XR!"         'SDI12-command for a reset of the sensor
+Const Lufft_SetHeatCtrlCMD = "XPHEP1!" 'SDI12-command to enable the heats control
+'Const Lufft_DefrostStartCMD = "XHDS!"  'SDI12-command to start the defrost cycle
+'Const Lufft_DefrostStopCMD = "XHDE!"   'SDI12-command to stop the defrost cycle
+  'defrost mode can be used automatically at startup of the sensor or if the sensor
+  '  shall be heated for a certain time, regardless the temperatures (with a higher
+  '  temperature threshold) - it isn't used currently
+Const Lufft_ViewBlockedError = 15    'error code if signal is too weak
+Const Lufft_TempLaserLow = 23        'error code for laser temperature too low
+
+Public SnowHeight_Lufft(8) : Alias SnowHeight_Lufft = Lufft_Timestamp,   SnowHeight_Laser, TempBlock_Lufft, TempAmbient_Lufft, TempLaser_Lufft,   SignalQuality_Lufft, Tilt_Lufft, ErrorCode_SHM31
+Units Lufft_Timestamp = s : Units SnowHeight_Laser = mm : Units TempBlock_Lufft = °C
+Units TempAmbient_Lufft = °C : Units TempLaser_Lufft = °C : Units Tilt_Lufft = °
+Units ErrorCode_SHM31 = code
+
+'Dim LufftData(4)                     'to store temporary data from sensor
+Const LufftBuffer0_Index = 1         'to access only first part of the data-array
+Const LufftBuffer1_Index = 5         'to access only second part of the data-array
+Public LufftSpecialCMDresponse As String * 30  'used for SDI12Recorder with commands
+Dim Lufft_DataInvalid As Boolean     'used to disable processing in datatable
+
+'***   constants & variables for snow drift sensor (particle counter)  ****************
+Const FlowCapt_Address = "6"         'SDI12-command of FlowCapt FC4 snow drift sensor
+Const FlowCapt_ReadCMD = "M!"        'SDI12-command to read all the data from sensor
+
+Public SnowDrift_FC4(8) : Alias SnowDrift_FC4 = SnowPartFluxMin, SnowPartFluxAvg,   SnowPartFluxMax, SnowPartFluxStd, SnowPartFluxCumul, WindSpeedMin_FC4,   WindSpeedAvg_FC4, WindSpeedMax_FC4
+Units SnowPartFluxMin = g/m²/s : Units SnowPartFluxAvg = g/m²/s
+Units SnowPartFluxMax = g/m²/s : Units SnowPartFluxStd = g/m²/s
+Units SnowPartFluxCumul = g/m² : Units WindSpeedMin_FC4 = km/h
+Units WindSpeedAvg_FC4 = km/h : Units WindSpeedMax_FC4 = km/h
+
+'***   constants & variables for the logger  *****************************************
+Public LoggerTemp : Units LoggerTemp = °C      'system variables
+Public BatteryVoltage : Units BatteryVoltage = V
+Public BatteryVoltage_min : Units BatteryVoltage_min = V
+Const BattMin_RunNr = 90 / SlowScanMeasureInterval       'running minimum over 1½ h
+
+Public Logger As String                        'variables to capture status infos
+Public ProgramName As String * 50
+Public ProgStartTime As Long
+Public ProgramSignature, ProgramErrors, CalibErrors
+Public BackupBattery : Units BackupBattery = V
+Public CardsFreeMemory As Long : Units CardsFreeMemory = kB   'used cards has 16GB
+
+'***   constants & variables for table and file handling  ****************************
+Const TableName_WindSonicFast = "WindSonic"
+Public TableTrig_WindSonicFast As Boolean      'to trigger the datatable or not
+Const FileName_WindSonicFast = "CRD:" & TableName_WindSonicFast & "_"
+Const FileDuration_WindSonic = 12 * 60 * 60    '[s], every 12h create new files (wind)
+Const MaxLines_WindSonicFast = FileDuration_WindSonic / (FastScanInterval/1000)
+  'FileDuration [s] and FastScanInterval [ms], defines the size of the respective file
+Const MaxFiles_WindSonicFast = 540 * (24*60*60/FileDuration_WindSonic)
+  'space for about 18 months of data, with 2 files per day (maximal 16GB on SDcard)
+Dim NewFile_WindSonicFast As Boolean           'set from the TableFile-function
+Public LastWrittenFile_WindSonicFast As String * 40 'set from the TableFile-function
+Public CurrentFile_WindSonicFast As String * 40     'updated by users function
+Dim StartTimeCurrentFile_WindSonicFast(9) As Long
+  'for the table with the timestamp, to check about the fitting fast-table files
+Const CheckFreeMemInterval = 24      'interval for checking cards free memory [h]
+Const CheckFreeMemTimeOnInt = 0      'time into interval, when to check [h], midnight
+Const CardMemSize = 16 * 1024^2      'SD-cards memory size 16GB, in [kB]
+Const CardMemThresh = 0.05           'threshold before stopping recording fast data
+
+Dim WindSonicFastTimestamp As Long : ReadOnly WindSonicFastTimestamp
+  'This counter is stored in the fast wind table, which hasn't the normal timestamp,
+  '  with this pseudo-timestamp the periodicity of the records can be reconstructed.
+Const WindSonicFastTimestamp_Mul = 2/FastScanInterval
+  'The readout of the timer [ms] is divided by the intervaltime and multiplied by 2 to
+  '  get a certain Shannon-redudancy of this counter.
+Units WindSonicFastTimestamp = x25ms
+Const MaxWindSonicFastTimestamp = 2^16         'as timestamp is stored as UINT2
+
+Const TableName_WindSonicTimestamp = "WindSonic_timestamp"
+Const FileName_WindSonicTimestamp = "CRD:" & TableName_WindSonicTimestamp & "_"
+Const MaxLines_WindSonicTimestamp = (1 + Ceiling(MaxLines_WindSonicFast/(MaxWindSonicFastTimestamp/2))) * 10
+  'a new timestamp-record each time the fast-timestamp (pseudo-timestamp) is reset
+  '  (is counted in steps of 2) during one file of fast data, round it up (because it
+  '  will reset the timestamp when a new fast-file will be created, so at the end of
+  '  the new fast-file there's an opened fast-timestamp counter-interval), + 1 for
+  '  the entry when a new fast-file has been created, create a new timestamp-file
+  '  after 10 files with fast data
+Dim NewFile_WindSonicTimestamp As Boolean      'set from the TableFile-function
+Public LastWrittenFile_WindSonicTimestamp As String * 40 'set from TableFile-function
+
+Const TableName_MeteoEntire = "Meteodata_Entire"
+Const FileName_MeteoEntire = "CRD:" & TableName_MeteoEntire & "_"
+Const FileInterval_MeteoEntire = 168 '[h], every week create a new file
+Const FileTimeOnInt_MeteoEntire = 12 'new file every monday at noon
+Public LastWrittenFile_MeteoEntire As String * 40        'set from TableFile-function
+
+Const TableSize_Transmit = 30 * 24 * 60 / TransmitDataInterval
+  'holds data for one month, if there's a communication interruption, it collects at
+  '  maximum data from one month over satellite
+
+Const TableName_Service = "ServiceData"
+Const FileName_Service = "CRD:" & TableName_Service & "_"
+Const FileInterval_Service = 30      '[day], every month create a new file
+Const FileTimeOnInt_Service = 0      'new file on first day after 30
+Const TableSize_Service = FileInterval_Service * 24 * 60 / ServcieDataInterval / 5 * 6
+  'file interval [d] & data interval [min], + 20% reserve (with 1.2 it's not integer)
+Const MaxFiles_Service = 15          'allocate memory for 450 days
+Public LastWrittenFile_Service As String * 40  'set from the TableFile-function
+
+Const TableName_Status = "StationStatus"
+Const FileName_Status = "CRD:" & TableName_Status & "_"
+Const MaxLines_Status = 100          'create a new file after 100 records
+'Public LastWrittenFile_Status As String * 40  'commented as it's not used
+Const StatTableInterval = 2          'interval of status-table called [mon], every 2
+Const StatTableTimeOnInt = 43200     'time into interval [s], first day at noon
+
+'***   general variables & variables for user control   ******************************
+Const SensorsStartUpDelay = 30       'wait at program start for sensors be ready [s]
+Dim SatModemPwrDown_TimerValue, CamPwrDown_TimerValue, SN500SS_Heater_TimerValue,   Lufft_Heater_TimerValue            'variables to read the timers value
+
+Public LufftForcePwrOn As Boolean    'flag to force the Lufft sensor on
+Public LufftDoCalibration As Boolean 'flag to execute a calibration of Lufft sensor
+Public PowerSatModem As Boolean      'flag to manually control satellite modems power
+Dim PowerSatModemPwrDown As Boolean
+Public PowerCam As Boolean           'flag to manually switch camera on
+Public ResetSN500SS As Boolean       'flag to reset radiation instrument
+Public ResetClimaVue_TRH_FlowCapt As Boolean   'flag to reset several instruments
+
+'***   not used constants and variables   ********************************************
+'  Const SlowerMeasureInterval = 10   'measurement interval for slower sensors [min]
+'  Const SN500SSPwrBattThreshold = 11.8
+    'switch radiation sensor off, if it's dropping below [V]
+'  Const BattThresholdHyst = 0.5      'hysteresis for various switch-on [V]
+
+'Public RecNum_WindSonicFast = 1      'first entry in the datatable will be recorded
+'Public AnemoPwrBattOK As Boolean     'flag to indicate if battery is ok to switch on
+'Dim AnemoPwrOff_TimerValue, ClimaVueTRHFC4_Reset_TimerValue, SN500SS_Reset_TimerValue
+
+'***   data tables are defined in a seperate file   **********************************
+'*************************************************************************************
+'* Tajikistan, Pik Ismoil Somoni Base Camp - snowdrift- & meteo-station              *
+'*************************************************************************************
+'* file:          Tajikistan_DataTables.cr1x        * author:   Ch. Buchli
+'* revision:      v1.0.0                            * date:     2020-02-03
+'*************************************************************************************
+'* main program:  Tajikistan_snwodrift-_meteostation.cr1x
+'* description:   definition of all the data tables for the main program
+'*************************************************************************************
+'* revision history:
+'*    v0.0.1    first draft & WIP (work in progress), polar output of sonic anemometer
+'*    v0.0.2    further WIP, adaptions to changed sensor settings
+'*    v0.0.4    initial program, tested on logger
+'*    v0.0.6    add some information for the station-status-table
+'*    v0.0.8    add flag for table-processing of Lufft-data
+'*    v0.0.9    changed names of radiation
+'*    v0.0.10   change unit for cards free space from B to kB, adapt variables for
+'*              processing in tables, add it for LightStrikesDist
+'*    v1.0.0    increase version after successful tests, ready for deployment
+'*************************************************************************************
+
+'***   data tables   *****************************************************************
+DataTable (WindSonic,TableTrig_WindSonicFast,-1)    'able to enable/disable recording
+  'this table contains all the single sonic wind values, with a 20Hz rate
+  DataInterval (0,FastScanInterval,msec,0)          'samples form each scan
+  TableFile (FileName_WindSonicFast,3,MaxFiles_WindSonicFast,MaxLines_WindSonicFast,0,sec,NewFile_WindSonicFast,LastWrittenFile_WindSonicFast)
+    'write files to card every 12h, TOB1 with header & no timestamp, the file is
+    '  accessed only once, when the defined amount of records are written to the file
+  'TableFile (FileNWindSonicame_WindSonicFast,3,MaxFiles_WindSonicFast,0,12,hr,NewFile_WindSonicFast,LastWrittenFile_WindSonicFast)
+    'alternative to write every 12h (on a schedule) a new file
+  Sample (1,WindSonicFastTimestamp,UINT2)      'counter to reconstruct a timestamp
+  FieldNames ("record_counter:counter 2 * f_record [x25ms]")
+  Sample (4,AnemoSonic(),IEEE4)                'values from Sonic Anemometer
+  'FieldNames ("WindSpeed_Sonic:speed [m/s],WindAzimut_Sonic:azimuth [°],WindElevation_Sonic:elevation [°],TemperatureAir_Sonic:air temperature [°C]")
+  FieldNames ("WindSpeed_U:speed from east [m/s],WindSpeed_V:speed from north [m/s],WindSpeed_W:speed from below [m/s],TemperatureAir_Sonic:air temperature [°C]")
+EndTable
+
+DataTable (WindSonic_Timestamp,True,MaxLines_WindSonicTimestamp)
+  'this table contains checkpoint values to reconstruct the timestamp from the
+  '  fast-table without timestamp and in addition
+  TableFile (FileName_WindSonicTimestamp,64,-1,MaxLines_WindSonicTimestamp,0,sec,NewFile_WindSonicTimestamp,LastWrittenFile_WindSonicTimestamp)
+    'write files with timestamp, TOB3, fill the card, use ring memory, the file is
+    '  accessed only once, when the defined amount of records are written to the file
+    '  with option 64 the records remain accessible by LoggerNet to collect them
+    '  normally, before they will be written to the file on the card
+  Sample (1,WindSonicFastTimestamp,UINT2)      'actual counter value
+  FieldNames ("record_counter:counter 2 * f_record [x25ms]")
+  Sample (4,AnemoSonic(),IEEE4)      'actual values to compare for timestamp recovery
+  'FieldNames ("WindSpeed_Sonic:speed [m/s],WindAzimut_Sonic:azimuth [°],WindElevation_Sonic:elevation [°],TemperatureAir_Sonic:air temperature [°C]")
+  FieldNames ("WindSpeed_U:speed from east [m/s],WindSpeed_V:speed from north [m/s],WindSpeed_W:speed from below [m/s],TemperatureAir_Sonic:air temperature [°C]")
+  Sample (1,CurrentFile_WindSonicFast,String)  'belonging file with fast wind data
+  FieldNames ("CurrentFile_WindSonicFast:current fast file WindSonic")
+  Sample (7,StartTimeCurrentFile_WindSonicFast,UINT2)
+    'time when belonging fast file was created,
+    '  with Year, Month, Day of month, Hours, Minutes, Seconds and Microseconds
+  FieldNames ("StartTimeCurrentFile_WiSoFa_year:year,StartTimeCurrentFile_WiSoFa_month:month,StartTimeCurrentFile_WiSoFa_day:day of month,StartTimeCurrentFile_WiSoFa_hour:hour of the day,StartTimeCurrentFile_WiSoFa_minute:minute,StartTimeCurrentFile_WiSoFa_seconds:seconds,StartTimeCurrentFile_WiSoFa_microsec:microseconds")
+EndTable
+
+DataTable (Meteodata_Entire,True,-1)
+  'this table contains all other meteo and snow drift data than from the sonic
+  '  anemometer, as not all sensors are measured in every measure scan, some values
+  '  will only be recorded as samples
+  DataInterval (0,MeteoDataInterval,min,0)
+  TableFile (FileName_MeteoEntire,64,-1,FileTimeOnInt_MeteoEntire,FileInterval_MeteoEntire,hr,0,LastWrittenFile_MeteoEntire)
+  WindVector (1,WindSpeed_Prop,WindDir_Prop,IEEE4,False,0,0,2)
+  FieldNames ("WindSpeedScalMean_Prop:mean scalar speed [m/s],WindSpeedVectMean_Prop:mean vector magnitude speed [m/s],WindDirVectMean_Prop:mean vector direction [°],WindDirStdDev_Prop:standard deviation direction [°]")
+    'mean scalar wind speed = Σscalars/N, mean vector magnitude speed = 
+    '  magnitude_Σvectors / N, mean vector direction = direction_Σvectors,
+    '  standard deviation direction = StdDev over all Θ
+  WindVector (1,WindSpeed_ClimaVue,WindDir_ClimaVue,IEEE4,Wind_ClimaVue_DataInvalid,0,0,2)
+  FieldNames ("WindSpeedScalMean_ClimaVUE:mean scalar speed [m/s],WindSpeedVectMean_ClimaVUE:mean vector magnitude speed [m/s],WindDirVectMean_ClimaVUE:mean vector direction [°],WindDirStdDev_ClimaVUE:standard deviation direction [°]")
+  Maximum (1,WindSpeedMax_ClimaVue,IEEE4,Wind_ClimaVue_DataInvalid,False)
+    'maximum of recorded wind speed maximums
+  FieldNames ("WindSpeedMax_ClimaVUE:maximum wind speed [m/s]")
+  Average (1,SolarRad_ClimaVue,IEEE4,False)
+  FieldNames ("SolarRadiation_ClimaVUE:direct & diffuse incomming radiation [W/m²]")
+  Totalize (1,Precip_ClimaVue,IEEE4,False)     'sum up the measured precipitation
+  FieldNames ("Precipitation_ClimaVUE:precipitation [mm]")
+  Totalize (1,LightStrikesCnt,UINT2,False)     'sum up the counted lightning strikes
+  FieldNames ("CountLightningStrikes_ClimaVUE:lightning strikes [cnt]")
+  Minimum (1,LightStrikesDist,FP2,LightStrikesDist_DataInvalid,False)
+    'smallest distance of lightning strikes, if no strikes sensors gives 0, so disable
+  FieldNames ("DistanceLightningStrikes_min_ClimaVUE:nearest lightning strike [km]")
+  Average (5,ClimaVueData(8),IEEE4,False)      'sereval data from ClimaVUE50
+  FieldNames ("TemperatureAir_ClimaVUE50:air temperature ClimaVUE50 [°C],PressureVapour:vapour pressure ClimaVUE50 [hPa],PressureBarometricAbsolute:absolute barometric pressure ClimaVUE50 [hPa],RelativeHumidity_ClimaVUE50:relative humidity ClimaVUE50 [%],TemperatureHumiditySensor_ClimaVUE50:humidity sensors temperature ClimaVUE50 [°C]")
+  Average (2,TRHData(1,1),IEEE4,False)         'both values from T&RH-sensor CS215
+  FieldNames ("TemperatureAir_CS215:air temperature CS215 [°C],RelativeHumidity_CS215:relative humidity CS215 [%])")
+  Average (2,TRHData(2,1),IEEE4,False)         'both values from T&RH-sensor HygroVUE10
+  FieldNames ("TemperatureAir_HygroVUE10:air temperature HygroVUE10 [°C],RelativeHumidity_HygroVUE10:relative humidity HygroVUE10 [%])")
+  Average (1,TempSurf_SI111,IEEE4,False)       'temperature of the snow surface
+  FieldNames ("TemperatureSurface_SI111:snow surface temperature (TSS) [°C]")
+  Average (1,TempBody_SI111,IEEE4,False)       'temperature of body of TSS-sensor
+  FieldNames ("TemperatureBody_SI111:SI111 bodys temperature [°C]")
+  Average (2,TempSoil(),IEEE4,False)           'temperature of both soil temp sensors
+  FieldNames ("TempSoil_1:soil temperature 1 [°C],TempSoil_2:soil temperature 2 [°C]")
+  Sample (4,RadNet_SN500SS,IEEE4)    'four components of radiation measurement
+  FieldNames ("ISWR:downwelling shortwave radiation [W/m²],RSWR:upwelling (reflected) shortwave radiation [W/m²],ILWR:downwelling longwave radiation [W/m²],OLWR:upwelling (emitted) longwave radiation [W/m²]")
+  Sample (1,SnowHeight_Laser,IEEE4)            'snow height from Lufft SHM31
+  FieldNames ("SnowHeight_Laser:snow height from laser [mm]")
+  Sample (8,SnowDrift_FC4(),IEEE4)             'all values from Flow Capt FC4-sensor
+  FieldNames ("SnowPartFluxMin_FC4:minimum particle flux [g/m²/s],SnowPartFluxAvg_FC4:average particle flux [g/m²/s],SnowPartFluxMax_FC4:maximum particle flux [g/m²/s],SnowPartFluxStdDev_FC4:standard deviation particle Flux [g/m²/s],SnowPartFluxCumulated_FC4:cumulated particle flux [g/m²],WindSpeedMin_FC4:minimum wind speed [km/h],WindSpeedAvg_FC4:average wind speed [km/h],WindSpeedMax_FC4:maximal wind speed [km/h]")
+EndTable
+
+DataTable (TransmitData,True,TableSize_Transmit)
+  'this table contains a selection of the recorded data, which will be collected by
+  '  satellite transmission three times a week
+  DataInterval (0,TransmitDataInterval,min,0)
+  Sample (1,LoggerTemp,FP2)                    'loggers panel temperature
+  FieldNames ("LoggerTemperature:temperature of loggers panel [°C]")
+  Average (1,BatteryVoltage,FP2,False)         'stations power supply
+  FieldNames ("BatteryVoltage_avg:loggers average supply voltage [V]")
+  Average (4,AnemoSonic(),FP2,False)           'values from Sonic Anemometer
+  'FieldNames ("WindSpeed_Sonic:speed [m/s],WindAzimut_Sonic:azimuth [°],WindElevation_Sonic:elevation [°],TemperatureAir_Sonic:air temperature [°C]")
+  FieldNames ("WindSpeed_U:speed from east [m/s],WindSpeed_V:speed from north [m/s],WindSpeed_W:speed from below [m/s],TemperatureAir_Sonic:air temperature [°C]")
+  WindVector (1,WindSpeed_Prop,WindDir_Prop,FP2,False,0,0,2)
+  FieldNames ("WindSpeedScalMean_Prop:mean scalar speed [m/s],WindSpeedVectMean_Prop:mean vector magnitude speed [m/s],WindDirVectMean_Prop:mean vector direction [°],WindDirStdDev_Prop:standard deviation direction [°]")
+  Totalize (1,Precip_ClimaVue,FP2,False)       'sum up the measured precipitation
+  FieldNames ("Precipitation_ClimaVUE:precipitation [mm]")
+  Totalize (1,LightStrikesCnt,UINT2,False)     'sum up the counted lightning strikes
+  FieldNames ("CountLightningStrikes_ClimaVUE:lightning strikes [cnt]")
+  Average (1,PresBaroAbs,FP2,False)            'barometric pressure from ClimaVUE50
+  FieldNames ("PressureBarometricAbsolute:absolute barometric pressure ClimaVUE50 [hPa]")
+  Average (2,TRHData(1,1),FP2,False)           'both values from T&RH-sensor CS215
+  FieldNames ("TemperatureAir_CS215:air temperature CS215 [°C],RelativeHumidity_CS215:relative humidity CS215 [%])")
+  Average (2,TRHData(2,1),FP2,False)           'both values from T&RH-sensor HygroVUE10
+  FieldNames ("TemperatureAir_HygroVUE10:air temperature HygroVUE10 [°C],RelativeHumidity_HygroVUE10:relative humidity HygroVUE10 [%])")
+  Average (1,TempSurf_SI111,FP2,False)         'temperature of the snow surface
+  FieldNames ("TemperatureSurface_SI111:snow surface temperature (TSS) [°C]")
+  Average (2,TempSoil(),FP2,False)             'temperature of both soil temp sensors
+  FieldNames ("TempSoil_1:soil temperature 1 [°C],TempSoil_2:soil temperature 2 [°C]")
+  Sample (4,RadNet_SN500SS,FP2)      'four components of radiation measurement
+  FieldNames ("ISWR:downwelling shortwave radiation [W/m²],RSWR:upwelling (reflected) shortwave radiation [W/m²],ILWR:downwelling longwave radiation [W/m²],OLWR:upwelling (emitted) longwave radiation [W/m²]")
+  Sample (1,SnowHeight_Laser,FP2)              'snow height from Lufft SHM31
+  FieldNames ("SnowHeight_Laser:snow height from laser [mm]")
+  Sample (1,SignalQuality_Lufft,UINT2)         'normalised signal (quality) of SHM31
+  FieldNames ("SignalQuality_Lufft:normalised signal of Lufft SHM31")
+  Sample (1,ErrorCode_SHM31,UINT2)             'error code from Lufft SHM31
+  FieldNames ("ErrorCode_Lufft:error code of Lufft SHM31")
+  Average (1,SnowPartFluxAvg,FP2,False)        'average snow particle flux of FC4
+  FieldNames ("SnowPartFluxAvg_FC4:average particle flux [g/m²/s]")
+  Totalize (1,SnowPartFluxCumul,FP2,False)     'cumulated snow particle flux of FC4
+  FieldNames ("SnowPartFluxCumulated_FC4:cumulated particle flux [g/m²]")
+EndTable
+
+DataTable (ServiceData,True,TableSize_Service)
+  'this table contains the service data, such as supply voltage or recorded errors
+  DataInterval (0,ServcieDataInterval,min,0)
+  TableFile (FileName_Service,64,MaxFiles_Service,FileTimeOnInt_Service,FileInterval_Service,day,0,LastWrittenFile_Service)
+  Sample (1,LoggerTemp,FP2)                    'loggers panel temperature
+  FieldNames ("LoggerTemperature:temperature of loggers panel [°C]")
+  Average (1,BatteryVoltage,FP2,False)         'stations power supply, average voltage
+  FieldNames ("BatteryVoltage_avg:loggers average supply voltage [V]")
+  Minimum (1,BatteryVoltage,FP2,False,False)   'minimal supply voltage
+  FieldNames ("BatteryVoltage_min:loggers minimum supply voltage [V]")
+  Maximum (2,ClimaVueData(13),FP2,False,False) 'alignment of ClimaVUE50
+  FieldNames ("TiltNS_ClimaVUE_max:north-south tilt of ClimaVUE [°],TiltWE_ClimaVUE_max:west-east tilt of ClimaVUE [°]")
+  Minimum (3,SnowHeight_Lufft(3),FP2,Lufft_DataInvalid,False)      'dev. temp. SHM31
+  FieldNames ("TemperatureBlock_Lufft:temperature device block [°C],TemperatureWindow_Lufft:temperature inside window [°C],TemperatureLaser_Lufft:temperature laser diode [°C]")
+  Minimum (1,SignalQuality_Lufft,UINT2,Lufft_DataInvalid,False)    'quality sig. SHM31
+  FieldNames ("SignalQuality_Lufft:normalised signal of Lufft SHM31")
+  Maximum (1,ErrorCode_SHM31,UINT2,Lufft_DataInvalid,False)   'error code Lufft SHM31
+  FieldNames ("ErrorCode_Lufft:error code of Lufft SHM31")
+  Maximum (1,Tilt_Lufft,FP2,Lufft_DataInvalid,False)     'alignment of Lufft SHM31
+  FieldNames ("Tilt_Lufft:tilt of Lufft SHM31 [°]")
+EndTable
+
+DataTable (StationStatus,True,MaxLines_Status)   'status table is stored in CPU-drive
+  'DataInterval (0,1,day,-1)         'called manually every two months
+  'TableFile (FileName_Status,64,1,MaxLines_Status,0,day,0,LastWrittenFile_Status)
+    'alternative to write the status table to the card too
+  Sample (1,Logger,String)
+  FieldNames ("LoggerName:one from settings")
+  Sample (1,ProgramName,String)
+  FieldNames ("ProgramName:filename of program")
+  Sample (1,ProgStartTime,NSEC)
+  FieldNames ("ProgStartTime:time of program-start")
+  Sample (1,ProgramSignature,UINT2)
+  FieldNames ("ProgramSignature:signature of program")
+  Sample (1,ProgramErrors,UINT2)
+  FieldNames ("ProgramErrors:errors during compile or runtime")
+  Sample (1,CalibErrors,UINT2)
+  FieldNames ("CalibErrors:calibration errors")
+  Sample (1,BackupBattery,FP2)
+  FieldNames ("LithiumBattery:voltage of backup battery")
+  Sample (1,CardsFreeMemory,UINT4)
+  FieldNames ("CardsFreeMemory:free memory on card [kB]")
+  Sample (1,LastWrittenFile_WindSonicFast,String)
+  FieldNames ("LastWrittenFile_WindSonicFast:last file, frequent wind data")
+  Sample (1,LastWrittenFile_WindSonicTimestamp,String)
+  FieldNames ("LastWrittenFile_WindSonicTimestamp:last file with according timestamp")
+  Sample (1,LastWrittenFile_MeteoEntire,String)
+  FieldNames ("LastWrittenFile_MeteoEntire:last file with all sensors data")
+EndTable
+
+'---------------------------------------------------------------------------------
+'---   A S T R O N O D E   D A T A   T R A N S M I S S O N                     ---
+'---------------------------------------------------------------------------------
+
+'* AstroNode define Log Table
+DataTable(StnLog,True,200)
+  Sample(1,LogText,String)
+EndTable
+
+'* AstroNode meteo averaging table (1h) here:
+DataTable (AN_1h,True,10) '' v1.2.1
+  DataInterval (0,1,Hr,2) ''  v1.2.1
+  '' example for air temperature averaged over 1 hour '' changed to 1 hour v1.2.1
+  Average (1,TempAir_CS215,FP2,False)  
+  FieldNames("TA_CS215")
+  Average (1,RelHum_CS215,FP2,False) 
+  FieldNames("RH_CS215")
+  Average (1,Precip_ClimaVue,FP2,False) 
+  FieldNames("Pr_ClimaVue")
+  Average (1,SnowHeight_Laser,FP2,False) ''v1.2.1
+  FieldNames("HS_Lufft")
+  Average (1,WindSpeed_Prop,FP2,False) 
+  FieldNames("VW_Prop")
+  Average (1,WindDir_Prop,FP2,False) 
+  FieldNames("DW_Prop")
+  Average (1,ISWR,FP2,False) 
+  FieldNames("ISWR")
+  Average (1,RSWR,FP2,False) 
+  FieldNames("RSWR")
+  Average (1,ILWR,FP2,False) 
+  FieldNames("ILWR")
+  Average (1,OLWR,FP2,False)  
+  FieldNames("OLWR")
+  Average (1,TempSurf_SI111,FP2,False) 
+  FieldNames("TS_SI111")
+  Average (1,PresBaroAbs,FP2,False) 
+  FieldNames("Ps_ClimaVue")
+  Average (1,TempAir_HygroVUE10,FP2,False) 
+  FieldNames("TA_HygroVUE10")
+  Average (1,RelHum_HygroVUE10,FP2,False) 
+  FieldNames("RH_HygroVUE10")
+  '' new variables v1.2.2
+  Average (3,AnemoSonic(),FP2,False)    'values from Sonic Anemometer
+  FieldNames ("WindSpeed_U,WindSpeed_V,WindSpeed_W")
+  Average (1,SnowPartFluxAvg,FP2,False) 'average snow particle flux of FC4
+  FieldNames ("SnowPartFluxAvg_FC4")
+  Average (2,TempSoil(),FP2,False)      'temperature of both soil temp sensors
+  FieldNames ("TempSoil_1,TempSoil_2")
+EndTable
+
+'* AstroNode define averaging table for service data (6 hours)
+DataTable (AN_6h,True,10)
+  DataInterval (0,6,Hr,2)
+  '' example for battery voltage (mean and minimum over 6h)
+  Average (1,BatteryVoltage,FP2,False)  
+  FieldNames("VBATmean")
+  Minimum (1,BatteryVoltage,FP2,False,False)
+  FieldNames("VBATmin")
+ 
+
+EndTable
+
+'*************************************************************************************
+'* AstroNode Functions to send data, retrieve commands and sync clock
+'* tested for: CR1000X, CR1000, CR800
+'* author: Andi Hasler (AH)
+'* (c): SensAlpin GmbH
+'*************************************************************************************
+'*
+'*   Modification History:
+'*   *********************
+'*   2023-06-29:  V1.0    Code based on AstroNode_test_fluela_0_4.CR1X
+'*   2023-07-04:  V1.1    Correction serial close in function / version number introduced
+'*   2023-07-04:  V1.2    Correction in serial port flushing (issue with CR1000)
+'*   2023-07-05:  V1.3    Set RS232 timeout according to previous value
+'*   2023-07-05:  V1.4    introduced "NoAN" as feedback and optimized RS232 timeout (AN_Answer as public)
+'*   2023-07-05:  V1.5    improved error handling in SyncfromAN
+'*   2023-07-07:  V1.6    different hand-over of queue variable between functions
+'*   2024-01-10:  V1.7    modified parsing of anwser in ReadCmdAN() 
+'*   2024-05-30:  V1.8    added time shift for synchronisation as optional parameter "TimeOffset" (shift in hours)
+'*   2025-02-20:  V1.9    added FP4 encoding (function "FloatToHex4")
+'*   2025-06-20:  V2.0    adaption in function ReadCmdAN(): length of string variable adapted
+
+Public AN_function_version = 2.0
+
+'-------------------------------------------------------------------------------------
+'---   Function to send command to AstroNode including checksum calculation CR1000
+'---   Input: CMD, [DAT, QUE]
+'---   Return: Code "OK: ", " ERR:" or "noAN"
+
+Function SendCMD(CMD As String * 6, Optional DAT As String * 400 = "" , Optional QUE As String * 6 = "" )  As String * 400
+  'internal variables
+  Dim ChecksumHex As String * 6
+  Dim CommandAstroNode As String * 400
+  Dim SendStringAstroNode As String * 410
+  Public AN_Answer As String * 400
+  Dim ans As String * 400
+  ' additional internal vaiables for checksum (CR1000 version)
+  Dim i, x As Long, data_len, datax, CRCd As Long
+  Dim CRC As String * 6
+  Dim datain As String * 400
+
+  'prepare command
+  CommandAstroNode = CMD + QUE + DAT
+
+  ' checksum calculation with inline code (similar as CR1000 version) V0.4
+  ' calculate checksum (CRC-16-CCITT checksum cf. :
+  ' https://docs.astrocast.com/docs/products/astronode-api/protocol-layer/transport-layer-description#CRC)
+  datain = CommandAstroNode
+  ' initialize calculation parameters
+  x = 0
+  CRC = "FFFF"
+  CRCd = HexToDec(CRC)
+  data_len = Len(datain)/2
+  ' loop through bytes (2 hex digits at once!!!):
+  For i = 1 To data_len '' start with 1:  run loop n times
+    datax = HexToDec(Mid(datain,(i*2)-1,2)) '' shift throug the bytes --> pairs of HEX digits
+    x = Floor(CRCd / (2^8)) XOR datax
+    x = x XOR (Floor(x / (2^4)))
+    CRCd = (CRCd * (2^8)) XOR (x * (2^12)) XOR (x * (2^5)) XOR x
+    CRCd = CRCd AND 65535 'mask with 16 bit
+  Next i
+  ' return CRC as hexadecimal value
+  CRC = Hex(CRCd)
+  If (Len(CRC)=3) Then CRC = "0"+CRC '' add "0" if only 3 hex digits
+  ' change byte order to directly fit into AstroNode command!
+  CRC = Mid(CRC,3,2)+Mid(CRC,1,2)
+  ChecksumHex = CRC
+  ' end checksum calculation
+
+  ' prepare send string
+  SendStringAstroNode = CHR(2)+CommandAstroNode + ChecksumHex +CHR(3)
+
+  ' send hex coded command string to RS232 from astronode
+  SerialFlush(ComRS232)
+  Delay (0,150,mSec)   'delay before sending V0.22
+  SerialOut(ComRS232,SendStringAstroNode,"",1,0)
+  'SerialFlush(ComRS232) '* no serial flush before readback -
+  '*  otherwise CR1000 looses characters V1.2
+
+  'delay before read back result
+  Delay (0,150,mSec)
+
+  ' read answer from Astronode
+  SerialIn (AN_Answer,ComRS232,10,CHR(03),80) '' set timeout to 10 '' V1.4
+  SerialFlush(ComRS232)
+
+
+  ' handle of AstroNode return value:
+  If AN_Answer = "" Then
+    AN_Answer ="noAN" '' no AstroNode detected  V1.4
+  Else
+    ans = Mid(AN_Answer,4,(Len(AN_Answer)-8)) ' crop parameter of answer
+    ' calculate answer command code (CMD + 0x80) and compare
+    If (HexToDec(CMD) +128) = HexToDec(Mid(AN_Answer,2,2)) Then
+      AN_Answer = "OK: " + ans
+    Else
+      AN_Answer  = "ERR:" + ans  '' shortend Err answer to have same length V1.5
+    EndIf
+  EndIf
+  Return(AN_Answer)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+'---   Function to encode Character String to Hex coded string (byte wise)
+'---   Input: Character String to convert
+'---   Return: String: Hex coded Ascii values of input string
+
+Function ChrtoHex(datain As String * 200)  As String * 400
+  Dim length, i
+  Dim hexstring As String * 400
+  length = Len(datain)
+  hexstring = ""
+  For i = 1 To length
+    hexstring = hexstring + Hex(ASCII(datain(1,1,i)))
+  Next i
+  Return(hexstring)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+'---   Function to decode Hex to Character String
+'---   Input: string with even amount of hex numbers (byte wise) exp:"3141..."
+'---   Return: character string exp: "1A..."
+
+Function HextoChr(hexin As String * 400)  As String * 200
+  Dim length, i
+  Dim chrstring As String * 200
+  length = Len(hexin)/2
+  chrstring = ""
+  ' loop through bytes (2 hex digits at once!!!)
+  For i = 1 To length
+    chrstring = chrstring + Left(CHR(HexToDec(Mid(hexin,(i*2)-1,2))),1)
+  Next i
+  Return(chrstring)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+'---   Function to encode Float to Hex ub half precision (2 bytes )
+'---   Input: float
+'---   Return: String: Hex coded
+'* IEEE 754 half-precision (16 bits) layout: 1 bit sign, 5 bit exponent, 10 bit fraction
+'* abs numbers smaller than 0.00006 are threated as 0
+'* abs numbers larger than 65504 result in +- infinit
+'* the fraction (manisssa) of this encoding has 10 bits, hence it covers about 3 decimal digits
+'* accordingly, inteegers larger than 1024 are not allways correctly tranmitted but may be floored to a lower value
+'* effect on SensAlpin Error codes
+'* 6996-6999 is floored to 6996
+'* 6992-6995 is floored to 6992 !!! note: from python encoding 6990 is returned!!!
+'* 6988-6991 is floored to 6988
+'* cf. https://gregstoll.com/~gregstoll/floattohex/ to exploor the effect for other numbers
+
+Function FloattoHex(datain) As String * 4
+  Dim sign As Long, expo As Long, fract As Float, bin16 As Long
+  Dim hexstring As String * 9
+
+  '* calculate sign, expoenent and fraction
+  If datain < 0 Then sign = 1 Else sign = 0
+  datain = ABS (datain)
+  If datain < 0.00006 Then ''lower limit
+    expo = -14
+    fract = 0
+  ElseIf datain > 65504 Then ''upper limit
+    expo = 16
+    fract = 1
+  Else
+    expo = Floor(LOG(datain)/LOG(2.0))
+    '* 2^x: base must be float to ensure result beeing float V0.34
+    fract = datain / (2.0^expo)
+  EndIf
+  '* calculate 16 bits of IEEE encoded floating point
+  bin16 = sign * (2^15) + ((expo+15)*(2^10)) + ((fract-1)*1024)
+  '* convert decimal to hex
+  hexstring =  Left(Hex(bin16), 4) 'otherwise some results are too long 'V0.34
+  '* prevent too short hex strings V0.34
+  Do While Len(hexstring)<4
+    hexstring += "0"
+  Loop
+  Return(hexstring)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+'---   Function to encode Float to Hex in single precision (4 bytes)
+'---   Input: float
+'---   Return: String: 4 byte hex coded value
+'* IEEE 754 single precision (32 bits) layout: 1 bit sign, 8 bit exponent, 23 bis fraction
+'* abs numbers smaller than 1.175E-38 are threated as 0
+'* abs numbers larger than 3.4E+38 result in +- infinit
+'' function develpoed with chatgpt
+Function FloatToHex4(datain As Float) As String * 8
+  Dim sign As Long, expo As Long
+  Dim fract As Float
+  Dim b1 As Long, b2 As Long, b3 As Long, b4 As Long
+  Dim hexstring As String * 8
+
+  '* calculate sign
+  If datain < 0 Then sign = 1 Else sign = 0
+  datain = ABS(datain)
+
+  '* special cases 
+  If datain = 0 Then
+    Return "00000000"
+  ElseIf datain > 3.4028235E+38 Then
+    Return "7F800000"  ' +∞
+  ElseIf datain < 1.17549435E-38 Then
+    Return "00000000"  ' Unterlauf als 0 behandeln
+  EndIf
+
+  '* calculate exponent (mit Bias 127 für Single Precision)
+  expo = Floor(LOG(datain) / LOG(2))
+  '* normalize rest
+  fract = datain / (2.0^expo)  ' Normierung (führt zu einer Zahl zwischen 1.0 und 2.0)
+  '* calculate mantisse: remove leading bit
+  fract = (fract - 1) * (2^23)
+
+  '* decompose 32 bits IEEE 754 value in 4 Bytes
+  b1 = (sign * 128) + (expo + 127) / 2  ' Höchstes Byte: Sign & oberste 7 Exponent-Bits
+  b2 = ((expo + 127) MOD 2) * 128 + INT(fract / (2^16))  ' Restliches Exponent-Bit + oberste Mantisse-Bits
+  b3 = Int(fract / 256) MOD 256  ' Mittleres Mantissen-Byte
+  b4 = Int(fract) MOD 256  ' Unterstes Mantissen-Byte
+
+  '* convert bytewise into hexadecimal number
+  hexstring = Right("0" & Hex(b1),2) & Right("0" & Hex(b2),2) & Right("0" & Hex(b3),2) & Right("0" & Hex(b4),2)
+
+  Return hexstring
+EndFunction
+
+
+'-------------------------------------------------------------------------------------
+'---   Function to initialize AstroNode
+'---   Input: non
+'---   Dependency: SendCMD()
+'---   Return: message for log
+
+Function InitAN() As String * 400
+  Dim Answer As String * 400
+  SerialOpen (ComRS232,9600,0,0,100)
+  '* clear payload
+  Answer = SendCMD("27")
+  'CFG_WR = write config ' appl layer char: 15 64 A3
+  Answer = SendCMD("05","040005")
+  SerialClose (COMRS232) ' cloase to save power!
+  Return("init AN config: " + Answer)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+'---   Function to send data via AstroNode to data portal
+'---   Input: SendData, Queue
+'---   Dependency: SendCMD()
+'---   Return: true if sucess and false if no space in queue or other error
+
+Function SendDataAN(DataSend As String * 200, Queue As Long)  As String * 6
+  Dim Answer As String * 400
+  Dim Return_Value As Boolean  
+  Dim QUE As String * 6
+  
+  'prepare Queue string
+  QUE = Hex(Queue)
+  Do While Len(QUE)<4
+    QUE = "0" + QUE
+  Loop
+  
+  'set up serial port
+  SerialOpen (ComRS232,9600,0,0,100)
+  '* call function to send command
+  Answer = SendCMD("25", DataSend, QUE)
+  '* prepare return and error handling
+  If Left(Answer,2)="OK" Then Return_Value = TRUE
+  If Left(Answer,4)="noAN" Then Return_Value = FALSE
+  If Left(Answer,3)="ERR" Then
+    Return_Value = FALSE
+    '* free space (del last enty) if return code 2501 "full payload"
+    If Right(Answer,4)= "0125" Then 'reverse byte order!
+      Answer = SendCMD("26") 'del oldest enry
+      Answer = SendCMD("05","040005") 'write config to dequeue automatically V0.32
+    EndIf
+    '* retry once if code 0001 "CRC NOT VALID"
+    If Right(Answer,4)= "0100" Then 'reverse byte order!
+      Answer = SendCMD("25", DataSend, QUE)
+      If Left(Answer,2)="OK" Then Return_Value = TRUE
+    EndIf
+  EndIf
+  SerialClose (COMRS232) '* serial close after all interaction with ANto save power! V1.1
+  Return(Return_Value)
+EndFunction
+
+
+
+'-------------------------------------------------------------------------------------
+'---   Function read command from user that was sent via AstroNode
+'---   Input: -
+'---   Dependency: SendCMD()
+'---   Return: Command retrieved from AstroNode
+
+Function ReadCmdAN()  As String * 20
+  Dim Answer As String * 100
+  Dim CMD As String * 40 '' response to cmd "47" has 8 or 40 bytes
+  '* set up serial port
+  SerialOpen (ComRS232,9600,0,0,100)
+  Answer = SendCMD("47") '* ask for command
+  If Left(Answer,2)="OK" Then
+    CMD = HextoChr(Mid(Answer,13,(Len(Answer)-8))) '* crop answer from 13th byte to end (V1.7 new changed from 9th byte)
+    Answer = SendCMD("48")  '* confirm and delete cmd
+  Else
+    CMD = Answer
+    If Right(Answer,4)= "0147" Then CMD = "none"
+    If Answer = "noAN" Then CMD = "none" '* reduce logs V1.4
+  EndIf
+  SerialClose (COMRS232) ' close to save power!
+  Return(CMD)
+EndFunction
+
+
+'-------------------------------------------------------------------------------------
+'---   Function to synchronize logger time from AstroNode clock
+'---   Input: TimeOffset (from UTC) in hours
+'---   Dependency: SendCMD()
+'---   Return: Feedback of synch
+
+Function SyncfromAN(Optional TimeOffset As Long = 0)  As String * 40
+  '* internal variables:
+  Dim Answer As String * 20,
+  Dim ans As String * 20, arev As String * 8
+  Dim i As Long
+  Dim TimeAN(9), Changesec
+  Dim RTANsec As Long, RTAN As String * 20, dt_sec As Long
+  Dim Feedback As String * 50
+
+  '* get AstroNode time with command x17 RTC_RR(real time clock request)
+  SerialOpen (ComRS232,9600,0,0,100)
+  Answer = SendCMD("17")
+  SerialClose (COMRS232) ' close to save power!
+
+  '* check AstroNode answer
+  If Answer = "noAN" Then Feedback = "NO SYNC: AN not reachable"
+  If Left(Answer,3)="ERR" Then Feedback = "NO SYNC: AN " + Answer
+  If Left(Answer,2)="OK" Then
+    '* process AN time and sync logger *************
+    '* crop and order reverse:
+    ans = Mid(Answer,5,(Len(Answer)-4))
+    arev=""
+    For i = 1 To (Len(ans)/2)
+      arev = Mid(ans,(i*2)-1,2)+ arev
+    Next i
+    '* convert and check time
+    RTANsec = HexToDec(arev) '*real time in seconds since 2018-01-01 - UTC
+    RTANsec = RTANsec + (TimeOffset * 3600) '' time offset added
+    If RTANsec > 1000000 Then '* exclude small returns from valid timerange (>2018-01-11)
+      dt_sec = SecsSince1990("2018-01-01 00:00:00",4)
+      RTAN = SecsSince1990(RTANsec + dt_sec,4)
+      '* insert clock values into time array:
+      TimeAN(1) = Mid(RTAN,1,4) '* year
+      TimeAN(2) = Mid(RTAN,6,2) '* month
+      TimeAN(3) = Mid(RTAN,9,2) '* day
+      TimeAN(4) = Mid(RTAN,12,2) '* hours
+      TimeAN(5) = Mid(RTAN,15,2) '* minutes
+      TimeAN(6) = Mid(RTAN,18,2) '* minutes
+      '* set logger time in UTC:
+      ClockSet (TimeAN())
+      '* monitor drift (in sec) and give feedback:
+      Changesec = ClockChange / 1000
+      Feedback = "OK: clock synched to UTC" +  TimeOffset + " drift: " + Changesec
+    Else
+      Feedback = "NO SYNC: AN has no valid time"
+    EndIf
+  EndIf '* end sync
+  '* return:
+  Return(Feedback)
+EndFunction
+
+'-------------------------------------------------------------------------------------
+
+' AstroNode: SETSettings 
+SetSetting("Baudrate(COMRS232)",9600) 
+
+'-------------------------------------------------------------------------------------
+'--- E N D    A S T R O N O D E
+'-------------------------------------------------------------------------------------
+
+'***   function & subroutines   ******************************************************
+Function GetStatus ()      'read some actual status data from Status-table
+  Logger = Status.StationName
+  ProgramName = Status.ProgName
+  ProgStartTime = Status.StartTime
+  ProgramSignature = Status.ProgSignature
+  ProgramErrors = Status.ProgErrors
+  CalibErrors = Status.ErrorCalib
+  BackupBattery = Status.LithiumBattery
+  If Status.CardStatus = "Card OK." Then       'test if a card is inserted
+    CardsFreeMemory = Status.CardBytesFree / toKiloB
+  EndIf          'read how much memory is left on SD-card [kB]
+EndFunction
+
+Function SI111Measure ()   'measure & calculate snow surface temperature
+  Dim TempSurf_K, TargetVoltage, m, b
+  '  TempBody_SI111, TempSurf_SI111
+  Therm109 (TempBody_SI111,1,SI111_SEch,SI111_VxCh,0,50,1,0)  'sensors body temp [°C]
+  VoltDiff (TargetVoltage,1,mV200,SI111_DIFFch,True,0,50,1,0)
+  'output of thermopile detector [mV], according to SI-111-L-10s manual
+  m = mC2 * TempBody_SI111^2 + mC1 * TempBody_SI111 + mC0
+  b = bC2 * TempBody_SI111^2 + bC1 * TempBody_SI111 + bC0
+  'calculation of slope & intercept coeffecients, according to SI-111-L-10s manual
+  TempSurf_K = ( (TempBody_SI111 - KelvinToCelsius)^4 + m * TargetVoltage + b )^0.25
+  'calculation of surface temperature, (- KelvinToCelsius) = CelsiusToKelvin
+  TempSurf_SI111 = TempSurf_K + KelvinToCelsius          'TempSurf_SI111 (TSS in [°C])
+EndFunction
+
+Function UpdateCurrentFileName (ptrLastWrittenFileName As String!, ptrCurrentFileName As String!)
+  'after a new file was written, update the name of the current file (used with
+  '  FastWindSonic-datafiles or other files with a number index like CRD:xxx_8.dat)
+  Dim FileIndex As Long
+  Dim PrecedingNamePart As String * 40
+  Dim SucceedingNamePart As String * 10
+  If !ptrCurrentFileName <> !ptrLastWrittenFileName AND !ptrLastWrittenFileName <> "" Then
+    SplitStr (FileIndex,!ptrLastWrittenFileName,"",1,0)
+    SplitStr (PrecedingNamePart,!ptrLastWrittenFileName,"_",1,5)
+    SplitStr (PrecedingNamePart,PrecedingNamePart,":",1,4)
+    SplitStr (SucceedingNamePart,!ptrLastWrittenFileName,".",1,4)
+    'extract index, name beginning and ending of the last file
+    FileIndex += 1                   'increment file index
+    !ptrCurrentFileName = PrecedingNamePart & "_" & FileIndex & "." & SucceedingNamePart
+    'assemble name of current file
+  EndIf
+EndFunction
+
+Function SatModemOn_Time As Boolean  'check if it's time to switch satellite modem on
+  Dim LoggersTime (9)      'holds actual loggers time (year, month, day of month,
+  ' hour of day, minutes, seconds, microseconds, day of week, day of year)
+  Alias LoggersTime (8) = Today      'actual day of the week (1-7; Sunday = 1)
+
+  RealTime (LoggersTime)   'read actual loggers time
+  If Today = SatModemPwrOn_Day1 OR Today = SatModemPwrOn_Day2 OR Today = SatModemPwrOn_Day3 Then
+    'first check if it's one of the three days where modem is switched on
+    If TimeIsBetween (SatModemPwrUpTime,SatModemPwrDownTime,SatModemIntervalMinutes,min) Then
+      Return True          'return true if it's on a correct day and in the timeslot
+    Else
+      Return False         'if it's on a correct day but not in the timeslot
+    EndIf
+  Else
+    Return False           'return false if not on correct day
+  EndIf
+EndFunction
+
+Function CamOn_Time As Boolean       'check if it's time to switch the webcam on
+  Dim SatTimeOn, TimeOn As Boolean
+  If SatModemOn_Time() = True AND TimeIsBetween (CamPwrUpTimeSat,CamPwrDownTimeSat,CamIntervalMinutes,min) Then
+    SatTimeOn = True                 'is it time to switch the camera on for a direct
+  Else                               '  transmission of a picture, when the satellite
+    SatTimeOn = False                '  modem is on too?
+  EndIf
+  If TimeIsBetween (CamPwrUpTime1,CamPwrDownTime1,CamIntervalMinutes,min) OR TimeIsBetween (CamPwrUpTime2,CamPwrDownTime2,CamIntervalMinutes,min)     OR TimeIsBetween (CamPwrUpTime3,CamPwrDownTime3,CamIntervalMinutes,min) OR TimeIsBetween (CamPwrUpTime4,CamPwrDownTime4,CamIntervalMinutes,min) Then
+    TimeOn = True                    'is it time to switch the camera on to take a
+  Else                               '  picture and store it locally?
+    TimeOn = False
+  EndIf
+  Return SatTimeOn OR TimeOn         'the camera decides by itself when, what to do
+EndFunction
+
+Function PortGet_UsrFct (TestPort) As Boolean  'returns the state of a certain port
+  Dim PortStatus As Boolean     '  as PortGet-function doesn't accept placeholder,
+  Select Case TestPort          '  even not a constant, this function was implemented
+    '  Case C1                    'as C1 is used for SDI12, PortGet must not be used,
+    '    PortGet (PortStatus,C1)  '  even if it will never be called with that option
+  Case C2
+    PortGet (PortStatus,C2)
+    '  Case C3
+    '    PortGet (PortStatus,C3)       'C3 is also used for SDI12
+  Case C4
+    PortGet (PortStatus,C4)
+    '  Case C5
+    '    PortGet (PortStatus,C5)       'C5 is also used for SDI12
+  Case C6
+    PortGet (PortStatus,C6)
+  Case C7
+    PortGet (PortStatus,C7)
+  Case C8
+    PortGet (PortStatus,C8)
+  Case SW12_1
+    PortGet (PortStatus,SW12_1)
+  Case SW12_2
+    PortGet (PortStatus,SW12_2)
+  Case Else
+    PortStatus = False             'return the determined state of the port
+  EndSelect
+  Return PortStatus
+EndFunction                          'almost the same functionality as CheckPort()
+
+Function SN500SS_HeatCondition As Boolean      'check if the conditions are given to
+  Dim RadiationToLow, WeatherConditions As Boolean  '  heat the SN500SS-radiomenter
+  If TimeIsBetween (SN500SS_RadMinTimewindowStart,SN500SS_RadMinTimewindowStop,SN500SS_RadMinTimewindowInt,min) AND ISWRmax < SN500SS_HeatRadMinThreshold Then
+    RadiationToLow = True            'check if the incomming short wave radiation is
+  Else                               '  to low, as it should be during daytime
+    RadiationToLow = False
+  EndIf
+  If TempAir_ClimaVue < SN500SS_HeatTempThreshold AND RelHum_ClimaVue >= SN500SS_HeatHumThreshold Then
+    WeatherConditions = True         'check if the weather conditions would possible
+  Else                               '  a freezing of the sensor
+    WeatherConditions = False
+  EndIf
+  Return RadiationToLow OR WeatherConditions   'if one of these criterions are true
+EndFunction
+
+'***   main program   ****************************************************************
+BeginProg
+  Timer (Timer_FastTimestamp,msec,Stop_Reset)  'initialize timer for pseudo timestamp
+  CurrentFile_WindSonicFast = TableName_WindSonicFast & "_0.dat"
+  'name of first file of WindSonicFast, parsing is first possible after writing file
+  Timer (Timer_AnemoSonic_PwrOff,sec,Stop_Reset)         'initialize timer
+  Wind_ClimaVue_DataInvalid = False  'init for a defined state at program start
+  LightStrikesDist_DataInvalid = False         'init for program start
+  ResetClimaVue_TRH_FlowCapt = False 'initialize sensors reset and its timer
+  Timer (Timer_ClimaVueTRHFC4_Reset,min,Stop_Reset)
+  ResetSN500SS = False               'initialize sensors reset and its timer
+  Timer (Timer_SN500SS_Reset,min,Stop_Reset)             'initialize timer
+
+  CardFlush                          'write remaining data from last run to the card
+  ResetTable (WindSonic)             'to reset the record counter of WindSonic-table
+  GetStatus()                        'read station status and save the startup-values
+  CallTable StationStatus
+
+  TableTrig_WindSonicFast = IIF (CardsFreeMemory >= CardMemThresh*CardMemSize,True,False)
+  'record measurements in fast-table WindSonic, if more than 5% of free memory
+  '* AstroNode modification:
+  'PowerSatModem = True               'for powering the sat modem at a program start
+  'PowerSatModemPwrDown = False
+  Timer (Timer_SatModemPwrDown,min,Stop_Reset) 'initialize timer
+  PowerCam = False                   'don't power camera on automatically at startup
+  Timer (Timer_CamPwrDown,min,Stop_Reset)      'initialize timer
+
+  '---   switch all instruments on   ---------------------------------------------------
+  SW12 (AnemoSonic_Pwr,True,0)                 'switch 3D Sonic Anemometer on
+  PortSet (ClimaTRH_FlowCapt_Pwr,NC_ON,1)      'switch sensors on (probably already)
+  SW12 (SN500SS_Pwr,True,1)                    'switch radiation sensor on
+  PortSet (LufftSnowHeight_Pwr,NO_ON,1)        'switch Lufft-sensor on
+  LufftForcePwrOn = True                       'activate one time window for startup
+  PortSet (LufftHeaterEnable,NO_OFF,1)         'disable Lufft-sensors heating
+  LufftDoCalibration = False                   'don't calibrate snow heigt measurement
+  Delay (1,SensorsStartUpDelay,sec)            'wait for the instruments to be ready
+
+  '---   initialize instruments   ------------------------------------------------------
+  SDI12Recorder (SN500SSSpecialCMDresponse,SN500SS_SDIPort,SN500SS_Address,SN500SS_HeatOffCMD,1,0)
+  'send command to switch off the sensors heater
+  SN500SS_HeaterActive = False                 'disable the sensors heating in case
+  Timer (Timer_SN500SS_Heater,min,Stop_Reset)  '  it would be activated
+
+  SDI12Recorder (LufftSpecialCMDresponse,LufftSDIPort,LufftSHM31_Address,Lufft_SetHeatCtrlCMD,1,0)
+  'send command to enable to heat control by hardware port (LufftHeaterEnable)
+  Timer (Timer_Lufft_Heater,min,Stop_Reset)    'initialize timer for heater dead time
+
+  Timer (Timer_FastTimestamp,msec,Reset_Start) 'start timer for pseudo timestamp
+  RealTime (StartTimeCurrentFile_WindSonicFast)
+  'first start time is the time when the program starts with the first scan
+
+  '---   fast (main) scan loop   -------------------------------------------------------
+  Scan (FastScanInterval,msec,6000,0)          'buffer for 5min (with 20Hz scan rate)
+    If PortGet_UsrFct(AnemoSonic_Pwr) = True Then
+      'only if sonic anemometer is on, AnemoSonic_Pwr can't be used
+      WindSonicFastTimestamp = Timer (Timer_FastTimestamp,msec,Read_only) * WindSonicFastTimestamp_Mul
+      'prepare the pseudo-timestamp for the record to be stored
+      If WindSonicFastTimestamp >= MaxWindSonicFastTimestamp OR (WindSonic.Record(1,1) + 1) MOD MaxLines_WindSonicFast = 0 Then
+        'restart the timer and set timestamp to 0, if it reached its maximum or the
+        '  next record number of the WindSonic-table is a multiple of MaxLines
+        '  (record counter starts with 0, then this will be first record of new file)
+        WindSonicFastTimestamp = Timer (Timer_FastTimestamp,msec,Reset_Start) * WindSonicFastTimestamp_Mul
+      EndIf
+
+      VoltSe (AnemoSonicVoltRaw(),4,mV5000,AnemoSonicU_SEch,False,0,15000,1,0)
+      'measure all 4 channels of the sonic anemometer
+      AnemoSonic() = AnemoSonicVoltRaw() * SonicMul() + SonicOff()
+      'measure the four channels of the anemometer (with 500µs)
+      CallTable WindSonic
+      'store the data in the table, if it's full it will be written to the SDcard
+      If WindSonicFastTimestamp = 0 OR NewFile_WindSonicFast = True Then
+        'if timestamp was restarted or a new file was created, store a value with the
+        '  normal timestamp in the second table
+        If NewFile_WindSonicFast = True Then
+          RealTime (StartTimeCurrentFile_WindSonicFast)  'actually the file was written
+          '  one scan before, but with this the time when the flag was set is stored
+          UpdateCurrentFileName (@LastWrittenFile_WindSonicFast,@CurrentFile_WindSonicFast)
+          'update the name of the current file of WindSonic
+        EndIf
+        CallTable WindSonic_Timestamp
+      EndIf
+    EndIf
+    PulseCount (WindSpeed_Prop,1,AnemoPropSpeed_Pch,5,PropSpeed_PulseCountAvgRun,PropSpeedMul,0)
+    'as it can't be placed in slow sequence, it's placed here, with a running
+    '  average with the same interval as the measure scan interval
+  NextScan
+
+  '---   measurement slow scan loop - measurement tasks   ------------------------------
+  SlowSequence
+  Scan (SlowScanMeasureInterval,min,3,0)
+    Battery (BatteryVoltage)       'measure loggers voltage supply and temperature
+    MinRun (BatteryVoltage_min,1,BatteryVoltage,BattMin_RunNr)
+    'calculate the minimum of the batterys voltage, to decide if power devices on
+    PanelTemp (LoggerTemp,50)
+
+    BrHalf (WindDir_Prop,1,mV5000,AnemoPropDir_SEch,AnemoPropDir_VxCh,1,4000,True,5000,15000,PropDirMul,0)
+    'measure the propellers rotation and the direction potentiometer, anemometer
+    If PortGet_UsrFct(ClimaTRH_FlowCapt_Pwr) = NC_ON Then
+      SDI12Recorder (ClimaVueData(),ClimaTRH_SDIPort,ClimaVueAddress,ClimaVue_StdReadCMD,1,0,-1)
+      'read CimaVUE50s measurement values (all 14 values)
+      Wind_ClimaVue_DataInvalid = IIF (WindSpeed_ClimaVue < 0,True,False)
+      'wrong WindSpeed-values can occur, in that case don't process them in the
+      '  datatable to preserve Max- and Min-functions to not be distorted
+      LightStrikesDist_DataInvalid = IIF (LightStrikesCnt = 0,True,False)
+      'for Min in datatable, disable processing of distance if no lightning strike
+      PresVapour = PresVapour * KiloToHecto              'convert from kPa to hPa
+      PresBaroAbs = PresBaroAbs * KiloToHecto            'convert from kPa to hPa
+      RelHum_ClimaVue = RelHum_ClimaVue * FracToPercent  'from fraction (0-1) to %
+      SDI12Recorder (TRHData(),ClimaTRH_SDIPort,TRH_CS215Address+TRH_HygroVueAddress,TRH_StdReadCMD,1,0)
+      'read measurement values from CS215 and HygroVUE10 TRH-sensors
+    EndIf
+    SI111Measure ()   'measure & calculate snow surface temperature
+    Therm107 (TempSoil_1,1,SoilTemp1_SEch,SoilTemp1_VxCh,1000,15000,1,0)
+    Therm107 (TempSoil_2,1,SoilTemp2_SEch,SoilTemp2_VxCh,1000,15000,1,0)
+    'measure thermistors for soil temperature
+    If PortGet_UsrFct(SN500SS_Pwr) = NO_ON Then
+      SDI12Recorder (RadNet_SN500SS(),SN500SS_SDIPort,SN500SS_Address,SN500SS_ReadCMD,1,0)
+      MaxRun (ISWRmax,1,ISWR,ISWRmax_RunNr)    'to decide if heat
+    EndIf                'measure radiation values, if sensor is on
+    If PortGet_UsrFct(LufftSnowHeight_Pwr) = NO_ON Then
+      SDI12Recorder (SnowHeight_Lufft(LufftBuffer0_Index),LufftSDIPort,LufftSHM31_Address,Lufft_ReadCMD_0,1,0)
+      SDI12Recorder (SnowHeight_Lufft(LufftBuffer1_Index),LufftSDIPort,LufftSHM31_Address,Lufft_ReadCMD_1,1,0)
+      'read both data buffers (commands R0! & R1!), with M! there's no data
+      SnowHeight_Laser = SnowHeight_Laser * toMilli    'convert from m to mm
+    Else                 'measure values of laser snow height sensor, if it's on
+      Lufft_Timestamp = 0          'as this is used elseswhere, reset it if Lufft off
+    EndIf
+    Lufft_DataInvalid = IIF (Lufft_Timestamp <= LufftStartupDelay,True,False)
+    'after Luffts startup, data should be valid to be processed in the ServiceData
+    '  -table (if flag is false, current input will be processed)
+    If IfTime (0,FlowCaptMeasureInterval,min) AND PortGet_UsrFct(ClimaTRH_FlowCapt_Pwr) = NC_ON Then
+      SDI12Recorder (SnowDrift_FC4(),FlowCaptSDIPort,FlowCapt_Address,FlowCapt_ReadCMD,1,0)
+    EndIf                'measure snow drift sensor values, if sensor is on
+
+    CallTable Meteodata_Entire     'call of all datatables with measurement data
+    CallTable TransmitData
+    CallTable ServiceData
+
+    '---   control power of sonic anemometer   ---------------------------------------
+    '      If BatteryVoltage_min < AnemoPwrBattThreshold Then     'leave anemometer for
+    '        CallTable WindSonic_Timestamp                        '  the moment always on
+    '        SW12 (AnemoSonic_Pwr,False,0)          'battery voltage is to low, switch off
+    '        Timer (Timer_FastTimestamp,msec,Stop_Reset)      'stop Timestamp-timer
+    '          'a kind of time hysteresis is realized with the running minimum of Vbatt
+    '        Timer (Timer_AnemoSonic_PwrOff,sec,Stop_Reset)
+    '      ElseIf PortGet_UsrFct(AnemoSonic_Pwr) = False AND (WindSpeed_Prop >= AnemoPwrOnWindThreshold OR WindSpeedMax_ClimaVue >= AnemoPwrOnWindThreshold) Then
+    '        SW12 (AnemoSonic_Pwr,True,0)           'switch sonic anemometer on, if off
+    '        Timer (Timer_FastTimestamp,msec,T_Start)         'restart Timestamp-Timer
+    '        'CallTable WindSonic_Timestamp         'not necessary, with FastTimestamp = 0
+    '        Timer (Timer_AnemoSonic_PwrOff,sec,Stop_Reset)
+    '      ElseIf WindSpeed_Prop < AnemoPwrOnWindThreshold AND WindSpeed_ClimaVue < AnemoPwrOnWindThreshold AND PortGet_UsrFct(AnemoSonic_Pwr) = True Then
+    '        AnemoPwrOff_TimerValue = Timer (Timer_AnemoSonic_PwrOff,sec,Read_only)
+    '        If AnemoPwrOff_TimerValue >= AnemoPwrOffTimerThreshold Then
+    '          CallTable WindSonic_Timestamp                  'for whole ElseIf-branch:
+    '          SW12 (AnemoSonic_Pwr,False,0)                  ' if WindSpeed falls below
+    '          Timer (Timer_FastTimestamp,msec,Stop_Reset)    ' threshold, wait for 5min
+    '          Timer (Timer_AnemoSonic_PwrOff,sec,Stop_Reset) ' before shutting down
+    '        ElseIf AnemoPwrOff_TimerValue = 0 Then           ' the sensor and stop
+    '          Timer (Timer_AnemoSonic_PwrOff,sec,T_Start)    ' Timestamp-timer
+    '        EndIf
+    '      Else
+    '        Timer (Timer_AnemoSonic_PwrOff,sec,Stop_Reset)   'keep sonic anemo off
+    '      EndIf
+    '---   reset functionality for ClimaVUE50,                                     ---
+    '---                 TRH-sensors CS215 & HygroVUE10 and Flow Capt FC4   ----------
+    If ResetClimaVue_TRH_FlowCapt = True Then               'if reset flag is set,
+      If PortGet_UsrFct (ClimaTRH_FlowCapt_Pwr) = NC_ON Then'  interrupt power of
+        PortSet (ClimaTRH_FlowCapt_Pwr,NC_OFF,1)            '  all 4 instruments
+        Timer (Timer_ClimaVueTRHFC4_Reset,min,Reset_Start)
+      ElseIf Timer (Timer_ClimaVueTRHFC4_Reset,min,Read_only) >= ClimaVue_TRH_FC4_SN500SS_ResetTime Then
+        PortSet (ClimaTRH_FlowCapt_Pwr,NC_ON,1)             'after given time, power
+        ResetClimaVue_TRH_FlowCapt = False                  '  up instruments again
+        Timer (Timer_ClimaVueTRHFC4_Reset,min,Stop_Reset)
+      EndIf
+    Else
+      PortSet (ClimaTRH_FlowCapt_Pwr,NC_ON,1)               'if reset flag isn't set
+      Timer (Timer_ClimaVueTRHFC4_Reset,min,Stop_Reset)     '  leave sensors on
+    EndIf
+    '---   reset functionality for radiation sensor SN500SS   ------------------------
+    If ResetSN500SS = True Then                        'if reset flag is set,
+      If PortGet_UsrFct (SN500SS_Pwr) = NO_ON Then     '  interrupt the sensors power
+        SW12 (SN500SS_Pwr,False,1)
+        Timer (Timer_SN500SS_Reset,min,Reset_Start)
+      ElseIf Timer (Timer_SN500SS_Reset,min,Read_only) >= ClimaVue_TRH_FC4_SN500SS_ResetTime Then
+        SW12 (SN500SS_Pwr,True,1)                      'after given time, power up
+        ResetSN500SS = False                           '  the instruments power again
+        Timer (Timer_SN500SS_Reset,min,Stop_Reset)
+      EndIf
+    Else
+      SW12 (SN500SS_Pwr,True,1)                        'if reset flag isn't set
+      Timer (Timer_SN500SS_Reset,min,Stop_Reset)       '  leave instrument on
+    EndIf
+    '---   control power of laser snow height sensor Lufft   -------------------------
+    If (TimeIsBetween (LufftPwrUpIntoInt,LufftPwrDownIntoInt,LufftPwrInterval,min) OR LufftForcePwrOn = True) AND BatteryVoltage_min >= LufftPwrBattThreshold Then
+      PortSet (LufftSnowHeight_Pwr,NO_ON,1)            'switch Lufft-sensor on
+    Else                                               '  from 9th to 10th minute
+      PortSet (LufftSnowHeight_Pwr,NO_OFF,1)           'switch Lufft-sensor off
+      LufftForcePwrOn = False                          'in case the battery is low
+    EndIf
+
+    If BatteryVoltage_min < LufftHeatBattThreshold Then' in case the battery is low
+      PortSet (LufftHeaterEnable,NO_OFF,1)             '  disable sensors heating
+      LufftForcePwrOn = False                          '  and switch sensor off
+    EndIf
+
+  NextScan
+  EndSequence
+
+  '---   second slow scan loop - controlling and system management tasks   -------------
+  SlowSequence
+  Scan (SlowScanControlInterval,min,0,0)
+    '---   heating control for radiation sensor SN500SS   ----------------------------
+    If SN500SS_HeatCondition() = True AND BatteryVoltage_min >= SN500SS_HeatBattThreshold Then
+      SN500SS_Heater_TimerValue = Timer (Timer_SN500SS_Heater,min,Read_only)
+      If SN500SS_Heater_TimerValue = 0 Then  'start heating sequence, over SDI12
+        SDI12Recorder (SN500SSSpecialCMDresponse,SN500SS_SDIPort,SN500SS_Address,SN500SS_HeatOnCMD,1,0)
+        SN500SS_HeaterActive = True
+        Timer (Timer_SN500SS_Heater,min,T_Start)
+      ElseIf SN500SS_Heater_TimerValue >= SN500SS_HeatTime AND SN500SS_HeaterActive = True Then
+        SDI12Recorder (SN500SSSpecialCMDresponse,SN500SS_SDIPort,SN500SS_Address,SN500SS_HeatOffCMD,1,0)
+        SN500SS_HeaterActive = False         'stop heating, after defined heat time
+      ElseIf SN500SS_Heater_TimerValue >= SN500SS_HeatDeadTime Then
+        Timer (Timer_SN500SS_Heater,min,Stop_Reset)    'release for next sequence
+      EndIf
+    ElseIf SN500SS_HeaterActive = True Then  'still heating, although not necessary
+      SDI12Recorder (SN500SSSpecialCMDresponse,SN500SS_SDIPort,SN500SS_Address,SN500SS_HeatOffCMD,1,0)
+      SN500SS_HeaterActive = False           'stop heating sequence immediately
+    EndIf
+    If Timer (Timer_SN500SS_Heater,min,Read_only) >= SN500SS_HeatDeadTime Then
+      Timer (Timer_SN500SS_Heater,min,Stop_Reset)      'in case the sensor works well
+    EndIf                '  before the dead time ended or if the battery was to low
+    '---   heating and calibration control for snow height sensor Lufft   ------------
+    If (ErrorCode_SHM31 = Lufft_ViewBlockedError OR ErrorCode_SHM31 = Lufft_TempLaserLow) AND BatteryVoltage_min >= LufftHeatBattThreshold Then
+      Lufft_Heater_TimerValue = Timer (Timer_Lufft_Heater,min,Read_only)
+      If Lufft_Heater_TimerValue = 0 Then    'if the sensor can't measure, switch it
+        PortSet (LufftHeaterEnable,NO_ON,1)  '  on and enable the heating, if it's
+        PortSet (LufftSnowHeight_Pwr,NO_ON,1)'  not started yet
+        LufftForcePwrOn = True               'force sensor on, make heating possible
+        Timer (Timer_Lufft_Heater,min,T_Start)
+      ElseIf Lufft_Heater_TimerValue >= LufftHeatTime AND PortGet_UsrFct (LufftHeaterEnable) = NO_ON Then
+        PortSet (LufftHeaterEnable,NO_OFF,1)      'disable the heating after certain
+        PortSet (LufftSnowHeight_Pwr,NO_OFF,1)    '  time, switch sensor off
+        LufftForcePwrOn = False
+      ElseIf Lufft_Heater_TimerValue >= LufftHeatDeadTime Then
+        Timer (Timer_Lufft_Heater,min,Stop_Reset) 'release for next heating sequence
+      EndIf
+    ElseIf PortGet_UsrFct (LufftHeaterEnable) = NO_ON Then
+      PortSet (LufftHeaterEnable,NO_OFF,1)   'still heating, although not necessary,
+      LufftForcePwrOn = False                '  disable and switch sensor off
+    EndIf
+    If Timer (Timer_Lufft_Heater,min,Read_only) >= LufftHeatDeadTime Then
+      Timer (Timer_Lufft_Heater,min,Stop_Reset)   'in case the sensor works well
+    EndIf                '  before the dead time ended or if the battery was to low
+
+    If LufftDoCalibration = True Then        'manual calib. of snow heigt measurement
+      LufftForcePwrOn = True       'switch sensor on in next measurement slow scan
+      If PortGet_UsrFct (LufftSnowHeight_Pwr) = NO_ON Then  'if sensor is ready
+        If LufftSpecialCMDresponse <> Lufft_CalibRESP Then
+          'if command was not send successfully yet, send it
+          SDI12Recorder (LufftSpecialCMDresponse,LufftSDIPort,LufftSHM31_Address,Lufft_CalibCMD,1,0)
+          '          ElseIf Lufft_Timestamp > LufftStartupDelay AND Round (SnowHeight_Laser,1) = 0.0 Then
+          '              'had sensor time enough for good values and calibration was successful
+        Else             'as this will be entered only next scan, there's time enough
+          LufftSpecialCMDresponse = ""       'erease received response
+          LufftDoCalibration = False         'send command and switch sensor off
+          LufftForcePwrOn = False
+        EndIf
+      EndIf
+    EndIf
+    '---   power control for satellite modem (terminal)   ----------------------------
+    '* AstroNode modification:
+    '* left away with AstroNode
+
+    '---   power control for the camera   --------------------------------------------
+    If CamOn_Time() = True AND BatteryVoltage_min >= CamBattThreshold Then
+      PortSet (Cam_Pwr,NO_ON,1)    'switch camera on, if in schedule and battery ok
+    ElseIf PowerCam = True AND BatteryVoltage_min >= CamBattThreshold Then
+      PortSet (Cam_Pwr,NO_ON,1)    'switch camera on, according to manual flag
+      CamPwrDown_TimerValue = Timer (Timer_CamPwrDown,min,Read_only)
+      If CamPwrDown_TimerValue = 0 Then 'start timer, if not started yet
+        Timer (Timer_CamPwrDown,min,T_Start)
+      ElseIf CamPwrDown_TimerValue >= CamTimerThreshold Then
+        PortSet (Cam_Pwr,NO_OFF,1) 'after given time, switch camera off
+        PowerCam = False           '  automatically and stop its timer
+        Timer (Timer_CamPwrDown,min,Stop_Reset)
+      EndIf
+    ElseIf PowerCam <> True OR BatteryVoltage_min < CamBattThreshold Then
+      PortSet (Cam_Pwr,NO_OFF,1)   'switch camera off, if not manually on or if the
+      PowerCam = False             '  battery voltage dropped to low
+      Timer (Timer_CamPwrDown,min,Stop_Reset)
+    EndIf
+    '---   montly record of status variables and check if card is full   -------------
+    GetStatus()          'read station status, for cards memory or record of status
+    TableTrig_WindSonicFast = IIF (CardsFreeMemory >= CardMemThresh*CardMemSize,True,False)
+    'record measurements in fast-table WindSonic, if more than 5% of free memory
+    If IfTime (StatTableTimeOnInt,StatTableInterval,mon) Then
+      CallTable StationStatus      'record every second month on first day at noon
+    EndIf
+  NextScan
+  EndSequence
+
+  '---------------------------------------------------------------------------------
+  '---   A S T R O N O D E   D A T A   T R A N S M I S S O N                     ---
+  '---------------------------------------------------------------------------------
+  '* AstroNode
+  '*define tiem offset for logger clock sync in hours
+  Const cTimeOffset = + 5 
+  
+  '' define variables for AN communication
+  Public InitFlagAN As Long
+  Public SendConf As Boolean
+  Public AN_Send_Success As Boolean
+  Public AN_Queue As Long
+  Public AN_SendFail As Long
+  Public AN_data_out As String * 200
+  Public AN_data_stack As String * 200 ''V1.2.1
+  Public CMDfromAN As String * 40
+
+  '*** log text
+  Public LogText As String * 50
+
+  '' slow scan every minute
+  SlowSequence
+  Scan(60,Sec,5,0)
+    
+    ''******************************************
+    '* different management tasks for AstroNode:
+    
+    '***   initialize AstroNode
+    If InitFlagAN < 1 Then
+      LogText = InitAN()
+      CallTable StnLog
+      InitFlagAN = 1
+      SendConf = TRUE
+    EndIf
+
+    '* power control of AN every day on 23:50 --> C7 ; at init / default = ON
+    If TimeIntoInterval(1430,1440,Min) Then
+      If BatteryVoltage > 11 Then
+        PortSet (C7,0)'AstroNode ON (low)
+      Else
+        PortSet (C7,1)'AstroNode OFF (high)
+      EndIf
+    EndIf
+    
+    '* re-initialze AstroNode if too many send fail
+    If AN_SendFail > 100 Then
+      InitFlagAN = 0 '' initiate AN-init
+      AN_SendFail = 0 '' reset SendFail counter
+    EndIf
+
+    '* reset counter if close to 2 byte integer range
+    If AN_Queue > 65000 Then AN_Queue = 0
+
+    '* retrieve command from AstroNodep
+    If TimeIntoInterval(0,2,hr) Then
+      CMDfromAN = ReadCmdAN()
+      If CMDfromAN <> "none" Then
+        LogText = "Command received: " +  CMDfromAN
+        CallTable StnLog
+      EndIf
+      '* parse command to send Config data
+      If CMDfromAN = "SendConf" Then SendConf = TRUE
+      '* reboot logger rev. V2.5
+      If (Mid(CMDfromAN,1,6) = "reboot") Then Restart
+      '* set new snow mounting height and persist ''V2.6
+      'If (Mid(CMDfromAN,1,7) = "SHM1_H=") Then
+        'SHM1_H = Mid(CMDfromAN,8,8)
+        'CodeParameterSET = TRUE 
+      'EndIf
+    EndIf
+
+    '* synch Logger with clock from AstroNode, one min after midnight
+    If TimeIntoInterval(1,1440,Min) Then
+      LogText = SyncfromAN(cTimeOffset)
+      CallTable StnLog
+    EndIf
+
+    ''***************************
+    '* sending data to AstroNode:
+        
+    '* Call AstroNode 1h and 6h aggregation table
+    CallTable AN_1h ''V1.2.1
+    CallTable AN_6h
+
+    '* sending meteo data to AstroNode every 2 hours with stacked data 
+    '* samlping data every hour and stack it to data (internal queue); V1.2.1
+    If TimeIntoInterval(0,1,Hr) Then
+      '* preparing data header for "stacked data" at 1st hour
+      '* cf. "Definition AstroNode to Sensalpin data transmission"
+      '* e.g. "61143C" for stacked FP2 with 20 values (hex 14) per line and 60 min dt (hex 3C)
+      If TimeIntoInterval(1,2,Hr) Then AN_data_stack = "61143C"
+      '* preparing data as 2byte float encoding(83 bytes; 6 fragments (2:4-21bytes,3:22-39B,4:40-57,6:76-93B)
+      AN_data_stack += FloattoHex(AN_1h.TA_CS215(1,1))
+      AN_data_stack += FloattoHex(AN_1h.RH_CS215(1,1))
+      AN_data_stack += FloattoHex(AN_1h.Pr_ClimaVue(1,1))
+      AN_data_stack += FloattoHex(AN_1h.HS_Lufft(1,1))
+      AN_data_stack += FloattoHex(AN_1h.VW_Prop(1,1))
+      AN_data_stack += FloattoHex(AN_1h.DW_Prop(1,1))
+      AN_data_stack += FloattoHex(AN_1h.ISWR(1,1))
+      AN_data_stack += FloattoHex(AN_1h.RSWR(1,1))
+      AN_data_stack += FloattoHex(AN_1h.ILWR(1,1))
+      AN_data_stack += FloattoHex(AN_1h.OLWR(1,1))
+      AN_data_stack += FloattoHex(AN_1h.TS_SI111(1,1))
+      AN_data_stack += FloattoHex(AN_1h.Ps_ClimaVue(1,1))
+      AN_data_stack += FloattoHex(AN_1h.TA_HygroVUE10(1,1))
+      AN_data_stack += FloattoHex(AN_1h.RH_HygroVUE10(1,1))
+      '* new variables in "AN_1h" table; revision v1.2.2
+      AN_data_stack += FloattoHex(AN_1h.WindSpeed_U(1,1))
+      AN_data_stack += FloattoHex(AN_1h.WindSpeed_V(1,1))
+      AN_data_stack += FloattoHex(AN_1h.WindSpeed_W(1,1))
+      AN_data_stack += FloattoHex(AN_1h.SnowPartFluxAvg_FC4(1,1))
+      AN_data_stack += FloattoHex(AN_1h.TempSoil_1(1,1))
+      AN_data_stack += FloattoHex(AN_1h.TempSoil_2(1,1)) 
+     '* sending data to queue every 2nd hour 1.2.1
+      If TimeIntoInterval(0,2,hr) Then
+        AN_Send_Success = SendDataAN(AN_data_stack,AN_Queue)
+        '* manage return message (retry and dequing in function "SendDataAN")
+        If NOT AN_Send_Success Then
+          LogText = "could not send QuNo: " + AN_Queue
+          CallTable StnLog
+          AN_SendFail += 1
+        EndIf
+        AN_Queue += 1
+      EndIf ''sending data
+    EndIf '' end stacked data
+    
+    '* sending service data to AstroNode every 6 hours
+    If TimeIntoInterval(0,6,hr) Then
+      '* preparing data as 2byte float encoding(9 bytes; 93 max)
+      AN_data_out = "12"
+      AN_data_out += FloattoHex(AN_6h.VBATmean(1,1))   '' from table
+      AN_data_out += FloattoHex(AN_6h.VBATmin(1,1))
+      AN_data_out += FloattoHex(status.ProgErrors)'' from status variable
+      AN_data_out += FloattoHex(status.ErrorCalib)     
+      AN_data_out += FloattoHex(AN_SendFail)           '' from variable   
+      '* sending data to queue
+      AN_Send_Success = SendDataAN(AN_data_out,AN_Queue)
+      '* manage return message (retry and dequing in function "SendDataAN")
+      If NOT AN_Send_Success Then
+        LogText = "could not send QuNo: " + AN_Queue
+        CallTable StnLog
+        AN_SendFail += 1
+      EndIf
+      '* encrease queue no.
+      AN_Queue += 1
+    EndIf
+
+    '* sending config data to AstroNode
+    If SendConf Then
+      '* preparing data as comma separeted string (xxx bytes; 3 fragments)
+      AN_data_out = "31"
+      AN_data_out += ChrtoHex("NISSAI") + ChrtoHex(",")
+      AN_data_out += ChrtoHex(cProgVers) + ChrtoHex(",")
+      AN_data_out += ChrtoHex(Status.ProgSignature(1,1)) + ChrtoHex(",")  
+      AN_data_out += ChrtoHex(AN_function_version) + ChrtoHex(",")
+      AN_data_out += ChrtoHex(status.LithiumBattery) + ChrtoHex(",")
+      AN_data_out += ChrtoHex(status.MemoryFree) + ChrtoHex(",") 
+      AN_data_out += ChrtoHex(status.CardBytesFree) + ChrtoHex(",")      
+      AN_data_out += ChrtoHex(status.StartTime) + ChrtoHex(",")
+      AN_data_out += ChrtoHex(status.WatchdogErrors) 
+      '* sending data to queue
+      AN_Send_Success = SendDataAN(AN_data_out,AN_Queue)
+      '* manage return message (retry and dequing in function "SendDataAN")
+      If NOT AN_Send_Success Then
+        LogText = "could not send QuNo: " + AN_Queue
+        CallTable StnLog
+        AN_SendFail += 1
+      EndIf
+      '* encrease queue no.
+      AN_Queue += 1
+      SendConf = FALSE
+    EndIf
+
+  NextScan
+  '* END AstroNode
+  '---------------------------------------------------------------------------------
+
+EndProg
